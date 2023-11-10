@@ -1,5 +1,5 @@
 #+title: Readme
-
+[[./logo.jpeg]]
 * TeK9DB
 Tek9 Is a local embedded database implemented in common lisp.
 

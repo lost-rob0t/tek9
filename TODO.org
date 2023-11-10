@@ -1,0 +1,8 @@
+#+title: Todo
+
+* TODO untouch a document
+* TODO load changed docs from disk
+* TODO Proper map reduice
+* TODO Replication with couchdb?
+* TODO Finish auto-view updating
+* TODO Compression
