@@ -16,9 +16,10 @@
           sbcl
           #lmdb.out
           glib
+          openssl
         ];
         shellHook = ''
-              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath([pkgs.lmdb.out])}
+              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath([pkgs.lmdb.out])}:${pkgs.lib.makeLibraryPath([pkgs.openssl])}
             '';
       };
   };
