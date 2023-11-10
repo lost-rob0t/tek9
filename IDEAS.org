@@ -1,0 +1,79 @@
+#+title: Ideas
+
+* database staleness
+thinking about how to handle when to rerun the map fn
+im thinking a staleness score
+maybe a normalized staleness 0.1 - 1
+a threshold, if more then float x consider stale
+or maybe x number of updates
+not always do you need to have a updated view BTW
+sometimes a stale result is ok
+like do you really really need to know that count of x type?
+* TODO Map reduce the correct way!
+Couchdb scans the whole database only once!
+Some way of tracking documents that have been updated or changes or new ones is a must.
+
+Maybe a key in the unanmed database can be used.
+a simple way of doing this is to use a stack var in memeory.
+Currently the database object looks like this
+#+begin_src lisp
+(defclass database ()
+  ((path :initarg :path :initform nil :accessor db-path)
+   (env :initarg :env :initform nil :accessor db-env)
+   (name :initarg :name :initform "" :accessor db-name)
+   (views :initarg :views :accessor db-views :initform (dict))
+   (document-count :initarg :count :initform 0 :accessor db-count)))
+#+end_src
+
+Out document object looks like so
+
+#+begin_src lisp
+(defclass document ()
+  ((id :initform (make-key-id) :type bytes :initarg :id)
+   (value :initform nil :initarg :value)
+))
+#+end_src
+
+So to the database object adding a changed slot which is a simple list to add document ids which have changed.
+Then when the view update comes it will go update them
+
+Heres a example
+#+begin_src lisp
+(defclass document ()
+  ((id :initform (make-key-id) :type bytes :initarg :id)
+   (value :initform nil :initarg :value)
+   (changed :initform nil :initarg :changed :accessor doc-changed)))
+
+
+
+(defun touch-document (database doc)
+  (setf (doc-changed doc) t)
+  (setf (db-changed database) (push (doc-id doc) (db-changed database))))
+
+
+(defun pop-document (database)
+  (setf (db-changed database) (pop db-changed database)))
+
+(defun run-views (database)
+  (loop for view in (db-views database)
+                   do (loop until (null (db-changed database))
+                            for doc = (pop-document database)
+                            do (run the view))))
+
+
+
+#+end_src
+
+This does not cover any error handling of the view!
+errors in views should be logged somewhere.
+
+* DONE I should probbably Remove the tek9 manager.....
+:LOGBOOK:
+CLOCK: [2023-10-05 Thu 16:01]--[2023-10-05 Thu 17:09] =>  1:08
+:END:
+Its really clunky and i would rather just work with a single database...
+
+
+* Big issue
+Couchdb actually only runs the view at query time!
+So we do not need to worry about updating it automatically
