@@ -16,7 +16,8 @@
 ;; This is the main object that represents the document!
 (defclass document ()
   ((id :initform (make-key-id) :type string :initarg :id :accessor doc-id)
-   (value :initform nil :initarg :value :accessor doc-value)))
+   (value :initform nil :initarg :value :accessor doc-value)
+   (changed :initform nil :initarg :changed :accessor doc-changed)))
 
 
 
@@ -42,24 +43,25 @@
 (declaim (inline touch-document))
 (defun touch-document (database document)
   (setf (doc-changed document) t)
-  (setf (db-changed database) (push (doc-id document) (db-chnaged database))))
+  (setf (db-changed database) (push (doc-id document) (db-changed database)))
+  document)
 
 
 ;; Put a key
 (declaim (inline put))
-(defun put (db document)
-  (let* ((env (db-env db))
+(defun put (database document)
+  (let* ((env (db-env database))
          (db (lmdb:get-db +main-name+ :env env))
          ;; Updating the changed flag!
-         (document (touch-document document)))
-    (lmdb:with-txn (:env env)
+         (document (touch-document database document)))
+    (lmdb:with-txn (:env env :write t)
       (lmdb:put db (doc-id document) (%* document))
       (lmdb:commit-txn env))))
 
 ;; Get a key. I dont get why the wrapper had to use g3t... fetch or find would also fit.
 (declaim (inline fetch))
-(defun fetch (db id)
-  (let* ((env (db-env db))
+(defun fetch (database id)
+  (let* ((env (db-env database))
          (db (lmdb:get-db +main-name+ :env env)))
     (lmdb:with-txn (:env env)
       ($ (lmdb:g3t db id)))))

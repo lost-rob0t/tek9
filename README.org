@@ -5,6 +5,16 @@ Tek9 Is a local embedded database implemented in common lisp.
 
 Under the hood it uses LMDB for extremely fast readback times.
 
+** Usage
+git clone to =~/quicklisp/local-projects/=
+
+Create a database
+#+begin_src lisp
+(ql:quickload :tek9)
+(in-package :tek9)
+(setq *db* (new-database "test" :path (uiop:parse-native-namestring "/tmp/tek9/")))
+(put *db* (new-document :value '(this is a value!)))
+#+end_src
 
 ** TODO Installation
-** TODO Usage
+** TODO Move code to src/
