@@ -42,7 +42,7 @@
   (uiop:ensure-all-directories-exist (list path))
   (make-instance 'database :name name :path path))
 
-(defmethod open-database ((db database &key (max-dbs 10)))
+(defmethod open-database ((db database) &key (max-dbs 10))
   (let* ((env (db-env db)))
     (setf (db-env db) (lmdb:open-env (db-path db)  :if-does-not-exist :create :max-dbs max-dbs))
     db))
