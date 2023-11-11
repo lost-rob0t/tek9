@@ -55,9 +55,9 @@
     (lmdb:close-env env)
     (setf (db-env db) nil)))
 
-
-(defmacro with-database (database  &optional (write nil) (sync t) (meta-sync t) &body body)
-  `(let ((env (db-env ,database)))
-     (lmdb:with-txn (:env env) ,write ,sync ,meta-sync
-       ,@body
-       (lmdb:commit-txn env))))
+;; TODO This is not correct
+;; (defmacro with-database ((database &optional (write nil) (sync t) (meta-sync t)) &body body)
+;;   `(let ((env (db-env ,database)))
+;;      (lmdb:with-txn (:env env) ,write ,sync ,meta-sync
+;;        ,@body
+;;        (lmdb:commit-txn env))))
