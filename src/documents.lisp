@@ -67,6 +67,20 @@
 (defun fetch* (db id)
   (doc-value (fetch db id)))
 
+(defun put-bulk (database documents &key (database-name +main-name+))
+  (let* ((env (db-env database))
+         (db (lmdb:get-db database-name :env env)))
+    (lmdb:with-txn (:env env :write t)
+      (loop for document in documents
+            do (lmdb:put db (doc-id document) (doc-value document)))
+      (lmdb:commit-txn env))))
+
+(defun put-bulk* (database documents &key (database-name +main-name+))
+  (put-bulk database (loop for  (key val) in documents
+                           collect (new-document :id key :value val))
+            :database-name database-name))
+
+
 ;; Document here is just a json string
 (defun put-json (db document)
   (let* ((db-env (db-env db))
