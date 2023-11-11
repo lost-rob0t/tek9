@@ -59,7 +59,7 @@
 (declaim (inline fetch))
 (defun fetch (database id &key (database-name +main-name+))
   (let* ((env (db-env database))
-         (db (lmdb:get-db database-name1 :env env :value-encoding :octets)))
+         (db (lmdb:get-db database-name :env env :value-encoding :octets)))
     (lmdb:with-txn (:env env)
       ($ (lmdb:g3t db id)))))
 
