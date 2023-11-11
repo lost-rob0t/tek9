@@ -58,6 +58,12 @@
       (lmdb:put db (doc-id document) (%* document))
       (lmdb:commit-txn env))))
 
+;; Magic function to also create the document "container" that holds it
+(defun put* (database document &key (database-name +main-name+) (id (make-key-id)))
+  (let ((doc (new-document :id id :value document)))
+    (put database doc)))
+
+
 ;; Get a key. I dont get why the wrapper had to use g3t... fetch or find would also fit.
 (declaim (inline fetch))
 (defun fetch (database id)
