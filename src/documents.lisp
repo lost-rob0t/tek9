@@ -21,8 +21,8 @@
 
 
 
-(defun new-document (&key (id (make-key-id) ) (value nil))
-  (make-instance 'document :id id :value value))
+(defun new-document (&rest keys-vals)
+  (apply #'make-instance 'document keys-vals))
 
 
 
@@ -40,9 +40,9 @@
 
 ;; Put a key
 (declaim (inline put))
-(defun put (database document &key (database-name +main-name+))
+(defun put (database document)
   (let* ((env (db-env database))
-         (db (lmdb:get-db database-name :env env))
+         (db (lmdb:get-db +main-name+ :env env))
          ;; Updating the changed flag!
          (document (touch-document database document)))
     (lmdb:with-txn (:env env :write t)
@@ -50,29 +50,17 @@
       (lmdb:commit-txn env))))
 
 ;; Magic function to also create the document "container" that holds it
-(defun put* (database document &key (database-name +main-name+) (id (make-key-id)))
+(defun put* (database document &key (id (make-key-id)))
   (let ((doc (new-document :id id :value document)))
     (put database doc)))
 
-
-;; Get a key. I dont get why the wrapper had to use g3t... fetch or find would also fit.
-(declaim (inline fetch))
-(defun fetch (database id &key (database-name +main-name+))
-  (let* ((env (db-env database))
-         (db (lmdb:get-db database-name :env env :value-encoding :octets)))
-    (lmdb:with-txn (:env env)
-      ($ (lmdb:g3t db id)))))
-
-;; Return The value
-(defun fetch* (db id)
-  (doc-value (fetch db id)))
 
 (defun put-bulk (database documents &key (database-name +main-name+))
   (let* ((env (db-env database))
          (db (lmdb:get-db database-name :env env)))
     (lmdb:with-txn (:env env :write t)
       (loop for document in documents
-            do (lmdb:put db (doc-id document) (doc-value document)))
+            do (lmdb:put db (doc-id document) (%* document)))
       (lmdb:commit-txn env))))
 
 (defun put-bulk* (database documents &key (database-name +main-name+))
