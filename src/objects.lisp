@@ -25,7 +25,8 @@
    (name :initarg :name :initform "" :accessor db-name)
    (views :initarg :views :accessor db-views :initform (dict))
    (document-count :initarg :count :initform 0 :accessor db-count)
-   (changes :initform (make-array 500 :element-type 'string  :adjustable t) :accessor db-changed)))
+   (changes :initform (make-array 500 :element-type 'string  :adjustable t) :accessor db-changed)
+   (size :initform (* 1024 1024) :initarg :size :accessor db-max-size :type integer)))
 
 ;;; ENCODING SECTION
 ;; NOTE This $%* is a helper function that just decodes stuff, its a thing from nim.
@@ -38,13 +39,13 @@
 
 ;;; DATABASE CRRATION/DELETION
 ;; Create a new database instance
-(defun new-database (name &key (path (uiop:parse-unix-namestring "./tek9-database/")) (meta nil))
+(defun new-database (name &key (path (uiop:parse-unix-namestring "./tek9-database/")) (max-size (* 1024 1014)))
   (uiop:ensure-all-directories-exist (list path))
-  (make-instance 'database :name name :path path))
+  (make-instance 'database :name name :path path :size max-size))
 
 (defmethod open-database ((db database) &key (max-dbs 10))
   (let* ((env (db-env db)))
-    (setf (db-env db) (lmdb:open-env (db-path db)  :if-does-not-exist :create :max-dbs max-dbs))
+    (setf (db-env db) (lmdb:open-env (db-path db)  :if-does-not-exist :create :max-dbs max-dbs :map-size (db-max-size db)))
     db))
 
 
