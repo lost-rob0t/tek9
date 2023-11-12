@@ -89,7 +89,7 @@
 
 ;; Return The value
 (defun fetch* (database id &key (database-name +main-name+))
-  (doc-value (fetch database id)))
+  (doc-value (fetch database id :database-name database-name)))
 
 
 (defun fetch-bulk (database document-ids &key (database-name +main-name+))
