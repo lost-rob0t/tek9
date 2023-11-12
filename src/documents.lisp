@@ -51,7 +51,7 @@
 
 ;; Magic function to also create the document "container" that holds it
 (defun put* (database document &key (id (make-key-id)))
-  (let ((doc (new-document :id id :value document)))
+  (let ((doc (new-document :id id :value document :changed t)))
     (put database doc)))
 
 
