@@ -19,6 +19,9 @@
    (value :initform nil :initarg :value :accessor doc-value)
    (changed :initform nil :initarg :changed :accessor doc-changed)))
 
+(conspack:defencoding document
+  id value changed)
+
 
 
 (defun new-document (&rest keys-vals)
