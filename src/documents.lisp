@@ -88,18 +88,18 @@
       ($ (lmdb:g3t db id)))))
 
 ;; Return The value
-(defun fetch* (database id)
+(defun fetch* (database id &key (database-name +main-name+))
   (doc-value (fetch database id)))
 
 
-(defun fetch-bulk (database document-ids)
+(defun fetch-bulk (database document-ids &key (database-name +main-name+))
   (let* ((env (db-env database))
-         (db (lmdb:get-db +main-name+ :env env)))
+         (db (lmdb:get-db database-name :env env)))
     (lmdb:with-txn (:env env :write nil)
       (loop for id in document-ids
             collect (cons id ($ (lmdb:g3t db id)))))))
 
-(defun fetch-bulk* (database document-ids)
+(defun fetch-bulk* (database document-ids &key (database-name +main-name+))
   (let ((results (fetch-bulk database document-ids)))
     (loop for result in results collect
                                 (cons (car result) (doc-value (cdr result))))))
