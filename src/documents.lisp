@@ -88,3 +88,30 @@
          (json-data (jsown:parse document))
          (id (jsown:val-safe json-data "id")))
     (put db (new-document :id (if id id (make-key-id)) :value json-data))))
+
+
+
+;; Get a key. I dont get why the wrapper had to use g3t... fetch or find would also fit.
+(declaim (inline fetch))
+(defun fetch (database id &key (database-name +main-name+))
+  (let* ((env (db-env database))
+         (db (lmdb:get-db database-name :env env :value-encoding :octets)))
+    (lmdb:with-txn (:env env)
+      ($ (lmdb:g3t db id)))))
+
+;; Return The value
+(defun fetch* (database id)
+  (doc-value (fetch database id)))
+
+
+(defun fetch-bulk (database document-ids)
+  (let* ((env (db-env database))
+         (db (lmdb:get-db +main-name+ :env env)))
+    (lmdb:with-txn (:env env :write nil)
+      (loop for id in document-ids
+            collect (cons id ($ (lmdb:g3t db id)))))))
+
+(defun fetch-bulk* (database document-ids)
+  (let ((results (fetch-bulk database document-ids)))
+    (loop for result in results collect
+                                (cons (car result) (doc-value (cdr result))))))
