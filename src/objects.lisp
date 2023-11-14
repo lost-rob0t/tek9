@@ -60,7 +60,13 @@
 
 (defmacro with-database ((database &key (write nil) (sync t) (meta-sync t)) &body body)
   `(let* ((env (db-env ,database)))
-
      (lmdb:with-txn (:env env :write ,write :sync ,sync :meta-sync ,meta-sync)
        ,@body
        (lmdb:commit-txn env))))
+
+
+(defun map-database (database &key (write nil) (sync t) (meta-sync t) (map-fn 'list) (database-name +main-name+))
+  (let ((db (lmdb:get-db database-name :env (db-env database))))
+    (with-database (database :write write :meta-sync meta-sync :sync sync)
+      (lmdb:do-db (key value db)
+        (funcall map-fn key ($ value))))))
