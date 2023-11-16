@@ -30,6 +30,7 @@
 
 ;;; ENCODING SECTION
 ;; NOTE This $%* is a helper function that just decodes stuff, its a thing from nim.
+
 (defun %* (entry)
   (cpk:encode entry))
 ;; NOTE This $ is a helper function that just decodes stuff, its a thing from nim.
@@ -39,9 +40,11 @@
 
 ;;; DATABASE CRRATION/DELETION
 ;; Create a new database instance
-(defun new-database (name &key (path (uiop:parse-unix-namestring "./tek9-database/")) (max-size (* 1024 1014)))
+
+(defun new-database (name &key (path (uiop:parse-unix-namestring "./tek9-database/")) (max-size (* 1024 1024)))
   (uiop:ensure-all-directories-exist (list path))
   (make-instance 'database :name name :path path :size max-size))
+
 
 (defmethod open-database ((db database) &key (max-dbs 10))
   (let* ((env (db-env db)))
@@ -57,12 +60,13 @@
     (setf (db-env db) nil)))
 
 
-
 (defmacro with-database ((database &key (write nil) (sync t) (meta-sync t)) &body body)
   `(let* ((env (db-env ,database)))
      (lmdb:with-txn (:env env :write ,write :sync ,sync :meta-sync ,meta-sync)
        ,@body
        (lmdb:commit-txn env))))
+
+
 
 
 (defun map-database (database &key (write nil) (sync t) (meta-sync t) (map-fn 'list) (database-name +main-name+))

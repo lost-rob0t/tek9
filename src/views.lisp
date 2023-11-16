@@ -7,7 +7,7 @@
    (view-reduce :initarg :reduce :reader view-reduce))
   (:documentation "Error thrown when there is a bug in a view."))
 
-
+-class
 (defclass database-view ()
   ((name :initform "" :type string :accessor view-name :initarg :name)
    (map-fn :initform nil :accessor view-map :initarg :map)
@@ -19,7 +19,7 @@
   (save-database-meta db))
 
 
-;;; ENCODING VIEWS
+ ;;; ENCODING VIEWS
 (defmethod conspack:encode-object append
     ((object database-view) &key &allow-other-keys)
   (conspack:slots-to-alist (object)
@@ -30,6 +30,7 @@
   (declare (ignore class))
   (alist-to-slots (alist object)
     name map-fn reduce-fn))
+
 
 
 (defun new-view (name map-fn reduce-fn)
@@ -54,16 +55,18 @@
 
 ;; Create the VIEW's database. DATABASE is a DATABASE object. Returns a
 ;; DATABASE OBJECT
+
 (defun create-view-db (database view)
   (lmdb:get-db (format nil "view/" (view-name view)) :env (db-env database)))
 
 ;; NOTE should I delete the view on update? im thinking so yes.
+
 (defun delete-view (database view)
   (lmdb:drop-db (view-name) (db-path database) :delete t))
 
 
 
-(declaim (inline insert-results))
+
 (defun insert-results (database view result)
   (let ((db (create-view-db database view))))
   (lmdb:with-txn (:env (db-env database) :write t)
@@ -72,6 +75,7 @@
 
 
 ;;; Applys the map-fn of the view against the database
+
 (defun apply-view-to-database (database view)
   (let* ((env (db-env database))
          (main-db (lmdb:get-db +main-name+)))
