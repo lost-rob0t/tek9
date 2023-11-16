@@ -8,6 +8,10 @@ Under the hood it uses LMDB for extremely fast readback times.
 ** Usage
 git clone to =~/quicklisp/local-projects/=
 
+#+begin_src shell
+git clone https://github.com/lost-rob0t/tek9.git ~/quicklisp/local-rpojects/tek9
+#+end_src
+
 Create a database
 #+begin_src lisp
 (ql:quickload :tek9)
@@ -16,5 +20,6 @@ Create a database
 (put *db* (new-document :value '(this is a value!)))
 #+end_src
 
-** TODO Installation
-** TODO Move code to src/
+** WARNING
+*YOU SHOULD NOT USE THIS WITHOUT GREAT UNDERSTANDING OR AWARENESS OF IMPLICATION'S OF USING A ALPHA QUALITY DATABASE IN PRODUCTION*
+That being said please let me know any issues incase you choose to use this.
