@@ -63,4 +63,5 @@
    :FETCH-NODE
            :select
    :APPLY-VIEW-TO-DATABASE
-           :database))
+           :database
+   :db-is-open-p))

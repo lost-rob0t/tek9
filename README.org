@@ -9,7 +9,7 @@ Under the hood it uses LMDB for extremely fast readback times.
 git clone to =~/quicklisp/local-projects/=
 
 #+begin_src shell
-git clone https://github.com/lost-rob0t/tek9.git ~/quicklisp/local-rpojects/tek9
+git clone https://github.com/lost-rob0t/tek9.git ~/quicklisp/local-projects/tek9
 #+end_src
 
 Create a database

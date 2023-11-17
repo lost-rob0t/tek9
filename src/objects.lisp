@@ -23,10 +23,15 @@
   ((path :initarg :path :initform nil :accessor db-path)
    (env :initarg :env :initform nil :accessor db-env)
    (name :initarg :name :initform "" :accessor db-name)
+   (open :initform nil :accessor db-open?)
    (views :initarg :views :accessor db-views :initform (dict))
    (document-count :initarg :count :initform 0 :accessor db-count)
    (changes :initform (make-array 500 :element-type 'string  :adjustable t) :accessor db-changed)
    (size :initform (* 1024 1024) :initarg :size :accessor db-max-size :type integer)))
+
+
+(defmethod db-is-open-p ((db database))
+  (db-open? db))
 
 ;;; ENCODING SECTION
 ;; NOTE This $%* is a helper function that just decodes stuff, its a thing from nim.
@@ -48,6 +53,7 @@
 
 (defmethod open-database ((db database) &key (max-dbs 10))
   (let* ((env (db-env db)))
+    (setf (db-open? db) t)
     (setf (db-env db) (lmdb:open-env (db-path db)  :if-does-not-exist :create :max-dbs max-dbs :map-size (db-max-size db)))
     db))
 
@@ -56,6 +62,8 @@
 
 (defmethod close-database ((db database))
   (let ((env (db-env db)))
+    (when (db-is-open-p db))
+    (setf (db-open? db) nil)
     (lmdb:close-env env)
     (setf (db-env db) nil)))
 
