@@ -49,8 +49,9 @@
 (defun %index-pairs-for-documents (index documents)
   "Materialize and sort index pairs for DOCUMENTS.
 
-This is intentionally an in-memory fast-build primitive. Use REBUILD-INDEX for
-the low-memory streaming path when the corpus is too large to sort in RAM."
+This is intentionally an in-memory sequential-build primitive. Use
+REBUILD-INDEX for the low-memory streaming path when the corpus is too large to
+sort in RAM."
   (sort
    (loop for document in documents
          append
@@ -146,22 +147,38 @@ The durable LMDB named database is intentionally retained."
       (lmdb:del db key))))
 
 (defun %write-sorted-index-pairs (index pairs)
-  "Append pre-sorted PAIRS to an empty INDEX inside the active write txn."
-  (let ((db (index-db index)))
-    (dolist (pair pairs)
-      (if (index-unique-p index)
-          (lmdb:put db
-                    (car pair)
-                    (cdr pair)
-                    :overwrite nil
-                    :append t)
-          (lmdb:put db
-                    (car pair)
-                    (cdr pair)
-                    :dupdata nil
-                    :append t
-                    :append-dup t
-                    :key-exists-error-p nil)))))
+  "Append pre-sorted PAIRS to an empty INDEX inside the active write txn.
+
+For a DUPSORT database MDB_APPEND is used only when the indexed key advances.
+Repeated values for the same indexed key use MDB_APPENDDUP instead. Mixing both
+flags on the same duplicate key causes LMDB to reject the second value."
+  (let ((db (index-db index))
+        (previous-key nil)
+        (have-previous-key nil))
+    (lmdb:with-cursor (cursor db)
+      (dolist (pair pairs)
+        (let* ((key (car pair))
+               (value (cdr pair))
+               (same-key-p (and have-previous-key
+                                (equal previous-key key))))
+          (cond
+            ((index-unique-p index)
+             (when same-key-p
+               (error "Unique Tek9 index ~S has duplicate key ~S."
+                      (index-name index) key))
+             (lmdb:cursor-put key value cursor
+                              :overwrite nil
+                              :append t))
+            (same-key-p
+             (lmdb:cursor-put key value cursor
+                              :dupdata nil
+                              :append-dup t))
+            (t
+             (lmdb:cursor-put key value cursor
+                              :dupdata nil
+                              :append t)))
+          (setf previous-key key
+                have-previous-key t))))))
 
 (defun clear-index (database name)
   "Remove every key from INDEX in one write transaction."
@@ -222,16 +239,17 @@ single LMDB write transaction; readers remain non-blocking."
                   &key
                     (database-name +main-name+)
                     track-changes)
-  "Fast, atomic initial load of DOCUMENTS and every registered secondary index.
+  "Atomically initial-load DOCUMENTS and every registered secondary index.
 
 BULK-LOAD requires an empty source database. Documents are sorted by primary
 key once, index pairs are extracted and sorted in memory before the write
-transaction, then the source and index B+trees are populated sequentially with
-LMDB APPEND/APPEND-DUP. This is the preferred initial-ingest path when the
-working set fits in RAM.
+transaction, then source and index B+trees are populated sequentially with LMDB
+APPEND/APPEND-DUP.
 
-The entire source+index load commits as one LMDB transaction. If any unique
-constraint or append invariant fails, nothing becomes visible."
+This is an optional RAM-for-sequential-I/O strategy, not universally faster
+than PUT-BULK with incremental index maintenance. Benchmark the target corpus.
+If any unique constraint or append invariant fails, the whole transaction rolls
+back."
   (let* ((source (%main-db database database-name))
          (documents (sort (copy-list documents) #'string< :key #'doc-id))
          (indexes (secondary-indexes-for database database-name))
