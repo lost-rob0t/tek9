@@ -15,7 +15,7 @@ Version 0.2 keeps the small Lisp-facing API while moving the hot paths toward LM
 - graph-facing string IDs mapped once to compact internal uint64 row IDs;
 - fixed-width graph adjacency records and predicate-specific adjacency indexes;
 - full durability by default, with weaker durability profiles only when explicitly selected;
-- CI benchmarks that are stored back in the repository and gate later commits on performance regressions.
+- comparative CI benchmarks that gate performance regressions without mutating the source branch.
 
 Tek9 is still alpha software. Treat the on-disk format and public API as evolving until a stable release is cut.
 
@@ -265,14 +265,23 @@ Run it locally with:
 (tek9-bench-compare:run)
 #+end_src
 
-CI emits structured benchmark JSON. Successful branch pushes commit the result back into:
+CI emits structured benchmark JSON for the current commit and its parent and uploads both files as a GitHub Actions artifact. The benchmark job never commits generated data back onto the source branch, so a successful check always belongs to the actual PR head being reviewed.
 
-#+begin_example
-bench/results/latest.json
-bench/results/history/<git-commit>.json
-#+end_example
+The older files under =bench/results/= are retained as historical benchmark snapshots from the previous write-back workflow. They are not updated automatically by CI.
 
-The next commit compares against the committed baseline. CI fails when the optimized path is materially slower and its relative advantage also degrades beyond the configured tolerance. Benchmark-result-only commits use =[skip ci]= and are ignored by the workflow trigger, so the write-back cannot loop forever.
+** CI/CD
+
+Pull requests and pushes run independent correctness and performance gates:
+
+- the full FiveAM suite on Ubuntu 22.04 and Ubuntu 24.04;
+- Python syntax validation for the benchmark aggregation/regression helpers;
+- a source-package smoke test;
+- same-runner parent/current performance regression benchmarks;
+- a final =merge-gate= job that fails unless every required lane succeeds.
+
+CI uses read-only repository permissions and cancels stale runs when a branch advances. Official GitHub actions are pinned to commit SHAs rather than floating tags.
+
+Pushing a tag such as =v0.2.0= runs the release workflow. The tag must match the ASDF version in =src/tek9.asd=. The workflow reruns the full test suite, creates =tek9-<version>.tar.gz= plus a SHA-256 checksum, uploads the package as a workflow artifact, and publishes the same files in a GitHub release.
 
 ** Close
 
