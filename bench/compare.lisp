@@ -266,7 +266,7 @@
         (close-database db)))))
 
 (defun run (&key
-              (write-count 1000)
+              (write-count 5000)
               (read-count 5000)
               (query-count 5000)
               (queries 250)
