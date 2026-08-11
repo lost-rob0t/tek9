@@ -12,4 +12,5 @@
                (:file "graphs")
                (:file "views")
                (:file "query")
-               (:file "tek9")))
+               (:file "tek9"))
+  :in-order-to ((test-op (test-op :tek9-tests))))
