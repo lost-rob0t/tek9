@@ -1,6 +1,6 @@
 (in-package :tek9)
 
-(defconstant +main-name+ "std"
+(defparameter +main-name+ "std"
   "Main document database name inside an LMDB environment.")
 
 (defconstant +default-map-size+ (* 16 1024 1024 1024)
