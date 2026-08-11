@@ -31,3 +31,12 @@ jobs:
             --eval '(asdf:load-asd (truename "tests/tek9-tests.asd"))' \
             --eval '(ql:quickload :tek9-tests)' \
             --eval '(asdf:test-system :tek9-tests)'
+
+      - name: Run comparative microbenchmarks
+        run: |
+          sbcl --non-interactive \
+            --load "$HOME/quicklisp/setup.lisp" \
+            --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
+            --eval '(ql:quickload :tek9)' \
+            --load bench/compare.lisp \
+            --eval '(tek9-bench-compare:run)'
