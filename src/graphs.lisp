@@ -154,15 +154,12 @@ the first graph-qualified key is beyond the entire shared node DB."
        (lmdb:g3t db (%graph-node-key database-name id))))))
 
 (defun fetch-bulk-nodes (database ids &key (database-name (get-default-graph-db)))
+  "Resolve arbitrary node ids in one snapshot with direct MDB_GET operations."
   (let ((db (get-graph-db database)))
     (with-database (database)
-      (lmdb:with-cursor (cursor db)
-        (loop for id in ids
-              for storage-key = (%graph-node-key database-name id)
-              collect
-              (multiple-value-bind (bytes found)
-                  (lmdb:cursor-set-key storage-key cursor)
-                (and found (%decode-document-or-object bytes))))))))
+      (loop for id in ids
+            for bytes = (lmdb:g3t db (%graph-node-key database-name id))
+            collect (%decode-document-or-object bytes)))))
 
 (defun add-node-edge (node edge)
   "Compatibility helper. Durable adjacency is stored in LMDB DUPSORT databases."
