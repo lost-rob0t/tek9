@@ -4,18 +4,18 @@
 
 Tek9 is a local embedded document and graph database implemented in Common Lisp on top of LMDB.
 
-Version 0.2 keeps the small Lisp-facing API, but moves the storage engine toward LMDB-native data structures instead of rebuilding database machinery in Lisp:
+Version 0.2 keeps the small Lisp-facing API while moving the hot paths toward LMDB-native storage structures:
 
 - one LMDB environment per Tek9 database;
 - cached named database handles;
-- one transaction for bulk mutation;
-- ordered primary-key range scans;
-- durable secondary indexes using LMDB named databases;
-- DUPSORT indexes for one-to-many values;
-- sequential APPEND/APPEND-DUP index builders for fast initial loads;
-- constant shared graph keyspaces with compact edge IDs and predicate adjacency indexes;
-- full durability by default with explicit weaker profiles for rebuildable data;
-- environment and database statistics for profiling.
+- batched write transactions;
+- ordered primary-key and secondary-index range scans;
+- durable DUPSORT secondary indexes;
+- grouped posting-list index builders for sequential rebuilds;
+- graph-facing string IDs mapped once to compact internal uint64 row IDs;
+- fixed-width graph adjacency records and predicate-specific adjacency indexes;
+- full durability by default, with weaker durability profiles only when explicitly selected;
+- CI benchmarks that are stored back in the repository and gate later commits on performance regressions.
 
 Tek9 is still alpha software. Treat the on-disk format and public API as evolving until a stable release is cut.
 
@@ -56,7 +56,7 @@ Keep the environment open for the lifetime of the application instead of reopeni
 (new-database "canonical" :path #P"/tmp/canonical/" :durability :full)
 #+end_src
 
-=:metadata-lazy= can lose the newest committed transaction after a machine crash but keeps LMDB's transactional structure. =:nosync= skips normal commit flushing and is intended only for disposable or reproducible stores where the caller explicitly accepts the crash-loss tradeoff.
+=:metadata-lazy= may lose the newest committed transaction after a machine crash while retaining LMDB's transactional structure. =:nosync= skips normal commit flushing and is intended only for disposable or reproducible stores where the caller explicitly accepts that tradeoff.
 
 Do not turn sync off just to make a benchmark look good.
 
@@ -71,7 +71,7 @@ Do not turn sync off just to make a benchmark look good.
 
 *** Bulk ingest
 
-Bulk writes share one LMDB write transaction instead of opening and committing one transaction per document.
+Bulk writes share one LMDB write transaction instead of committing one transaction per document.
 
 #+begin_src lisp
 (put-bulk *db*
@@ -81,17 +81,17 @@ Bulk writes share one LMDB write transaction instead of opening and committing o
                          :value (list :n i))))
 #+end_src
 
-If the ids are already in LMDB key order, pass =:sorted t=. Tek9 checks the database's current final key and uses LMDB's append fast path only when it is safe; otherwise it automatically falls back to normal insertion.
+If IDs are already in LMDB key order, pass =:sorted t=. Tek9 checks the database's current final key and uses LMDB's append fast path only when the append precondition is valid; otherwise it falls back to normal insertion.
 
 #+begin_src lisp
 (put-bulk *db* sorted-documents :sorted t)
 #+end_src
 
-Large imports do not populate Tek9's materialized-view change vector by default. Use =:track-changes t= only when the caller intends to feed those ids through the legacy incremental view API.
+Large imports do not populate the legacy materialized-view change vector by default. Use =:track-changes t= only when that incremental view workflow needs it.
 
-*** Fast indexed initial load
+*** Indexed initial load
 
-When a source database is empty and its secondary indexes are already registered, =bulk-load= is the fastest intended ingest path. It sorts the documents and extracted index pairs in memory, then append-loads the source B+tree and every index in one LMDB write transaction.
+When a source database is empty and its secondary indexes are already registered, =bulk-load= can build source rows and indexes atomically in one write transaction.
 
 #+begin_src lisp
 (register-index
@@ -103,9 +103,9 @@ When a source database is empty and its secondary indexes are already registered
 (bulk-load *db* documents)
 #+end_src
 
-The source database must be empty. The source rows and every registered index commit atomically. If a unique index rejects a duplicate key, the whole load rolls back.
+The source database must be empty. Each index groups postings by key, sorts the distinct keys and local posting lists, then feeds LMDB in ordered form. If a unique constraint fails, the complete source+index transaction rolls back.
 
-This path deliberately trades RAM for fewer B+tree comparisons and more sequential page work. Use normal =put-bulk= for incremental ingest.
+This is an explicit RAM-for-sequential-I/O path, not an unconditional replacement for =put-bulk=. The CI benchmark keeps both strategies measurable.
 
 *** Bulk reads
 
@@ -113,11 +113,11 @@ This path deliberately trades RAM for fewer B+tree comparisons and more sequenti
 (fetch-bulk *db* '("000000000001" "000000000002" "000000000003"))
 #+end_src
 
-The ids are resolved inside one read snapshot with one reusable cursor.
+Arbitrary point IDs are resolved inside one read snapshot with direct LMDB =MDB_GET= operations. Exact-key cursor seeks benchmarked worse and were removed from this path.
 
 ** Secondary indexes
 
-A secondary index is another LMDB named database, not a Lisp hash-table cache. Non-unique indexes use DUPSORT so one indexed value maps directly to multiple sorted document ids.
+A secondary index is another LMDB named database, not a Lisp hash-table cache. Non-unique indexes use DUPSORT so one indexed value maps directly to multiple sorted document IDs.
 
 #+begin_src lisp
 (register-index
@@ -134,13 +134,11 @@ A secondary index is another LMDB named database, not a Lisp hash-table cache. N
 
 Indexes are maintained in the same write transaction as document replacement and deletion.
 
-For an existing corpus, =rebuild-index= is the bounded-memory path. =rebuild-index-fast= materializes and sorts all index pairs in RAM, then feeds the empty index with LMDB's sequential append flags.
+=rebuild-index= is the bounded-memory streaming path. =rebuild-index-fast= groups postings in memory by index key and then append-loads those groups in sorted order. Whether the grouped path wins depends on corpus size and cardinality, so CI measures it instead of assuming it is faster.
 
 #+begin_src lisp
 (rebuild-index-fast *db* "dtype")
 #+end_src
-
-Use the fast rebuild when its extracted index pairs comfortably fit in memory; use the streaming rebuild for very large corpora.
 
 Integer indexes can use LMDB's native unsigned-64 ordering:
 
@@ -171,18 +169,43 @@ Use an index or ordered range when the predicate is indexable. =select= remains 
 
 ** Graph storage
 
-Logical graphs do not each consume their own collection of LMDB named databases. Every graph shares a constant physical set of keyspaces, with the logical graph name encoded into each storage key:
+The graph API still exposes normal string IDs and logical graph names, but the physical =graph/v2= hot path resolves them to compact internal IDs. Logical graphs share a constant set of LMDB databases; graph namespaces are isolated by the external-ID mapping.
 
 #+begin_example
-graph/nodes           (graph-name,node-id) -> encoded node
-graph/edges           (graph-name,edge-id) -> encoded edge
-graph/out             (graph-name,source-node-id) -> DUPSORT edge ids
-graph/in              (graph-name,target-node-id) -> DUPSORT edge ids
-graph/out-predicate   (graph-name,source-node-id,predicate) -> DUPSORT edge ids
-graph/in-predicate    (graph-name,target-node-id,predicate) -> DUPSORT edge ids
+graph/v2/meta
+  counter-name -> uint64 next-row-id
+
+graph/v2/node-map
+  (graph-name, external-node-id) -> uint64 node-row
+
+graph/v2/edge-map
+  (graph-name, external-edge-id) -> uint64 edge-row
+
+graph/v2/predicate-map
+  predicate -> uint64 predicate-row
+
+graph/v2/nodes
+  uint64 node-row -> encoded node
+
+graph/v2/edges
+  uint64 edge-row -> encoded edge
+
+graph/v2/out
+  uint64 source-row -> DUPSORT fixed 16-byte (neighbor-row, edge-row)
+
+graph/v2/in
+  uint64 target-row -> DUPSORT fixed 16-byte (neighbor-row, edge-row)
+
+graph/v2/out-predicate
+  fixed 16-byte (source-row, predicate-row)
+    -> DUPSORT fixed 16-byte (neighbor-row, edge-row)
+
+graph/v2/in-predicate
+  fixed 16-byte (target-row, predicate-row)
+    -> DUPSORT fixed 16-byte (neighbor-row, edge-row)
 #+end_example
 
-Edges have independent compact IDs. This keeps DUPSORT adjacency values small, permits multiple parallel edges between the same two nodes, and avoids rewriting a node whenever an edge changes.
+The external strings are resolved at the API boundary. Neighbor traversal then stays on integer/fixed-width LMDB keyspaces and does not decode edge objects unless the caller actually asks for edges.
 
 #+begin_src lisp
 (defparameter *a* (make-instance 'node :id "a" :props '(:name "A")))
@@ -203,37 +226,53 @@ Edges have independent compact IDs. This keeps DUPSORT adjacency values small, p
                       :predicate "knows")
 #+end_src
 
-When a predicate is supplied, Tek9 reads the predicate-specific adjacency B+tree instead of loading and filtering every incident edge. Edge records and all generic/predicate adjacency entries are mutated atomically in one LMDB transaction. Neighbor reads resolve adjacency, edge records, and target nodes in one read snapshot.
+Edges have independent IDs, so parallel edges are preserved. Replacing an existing edge ID removes its old generic and predicate-specific adjacency entries before the new edge is inserted. Every edge mutation and all adjacency updates happen atomically in one LMDB write transaction.
 
 ** Views
 
-Views remain available for derived materialized results. Version 0.2 fixes their transaction boundaries and rebuild path; secondary indexes should be preferred for ordinary equality and range lookup because they avoid running arbitrary map functions across the full corpus.
+Views remain available for derived materialized results. Version 0.2 fixes their transaction boundaries and rebuild path. Secondary indexes should be preferred for normal equality and range lookup because they avoid arbitrary mapper execution across the full corpus.
 
 ** Performance rules
 
 1. Keep one LMDB environment open per application database.
-2. Batch writes into one transaction whenever the operation is logically atomic.
-3. Feed sorted initial or tail-appending loads through =:sorted t=; Tek9 verifies the append precondition before using the fast path.
-4. Use =bulk-load= for an empty indexed database when the index-pair working set fits in RAM.
-5. Put selective query predicates behind secondary indexes instead of repeatedly decoding every document.
-6. Use range cursors for ordered predicates.
-7. Use predicate-specific graph adjacency when the relationship type is known.
-8. Store graph adjacency in shared DUPSORT keyspaces instead of embedding growing edge lists in node values or creating DBIs per logical graph.
+2. Batch logically atomic writes into one transaction.
+3. Use =:sorted t= only as a hint; Tek9 verifies whether LMDB append is actually safe.
+4. Put selective predicates behind secondary indexes instead of decoding the whole corpus.
+5. Use range cursors for ordered predicates.
+6. Resolve external graph IDs once, then stay on internal uint64/fixed-width adjacency structures.
+7. Use predicate-specific adjacency whenever the relationship type is known.
+8. Keep graph DBI count constant instead of creating named databases per logical graph.
 9. Choose a generous LMDB map size up front; it reserves address space rather than eagerly allocating the whole file.
-10. Benchmark with the durability profile that production will actually use.
-11. Measure environment/database statistics before inventing caches above the memory-mapped store.
+10. Benchmark with the same durability profile production uses.
+11. Do not keep an optimization merely because it sounds database-like; the CI benchmark decides whether it stays fast.
 
-Tek9 intentionally does not add its own buffer pool, write-ahead log, or page cache above LMDB. LMDB already owns those storage-engine responsibilities; Tek9 concentrates on key layout, indexing, batching, query planning, graph semantics, and the Common Lisp API.
+Tek9 intentionally does not add its own buffer pool, WAL, or page cache above LMDB. LMDB already owns those storage-engine responsibilities. Tek9 concentrates on key layout, indexing, batching, query planning, graph semantics, and the Common Lisp API.
 
-** Benchmark harness
+** Benchmark regression gate
 
-Load =bench/compare.lisp= after Tek9 and run:
+The comparative benchmark runs with =:full= durability and currently covers:
+
+- per-document durable commits versus batched writes;
+- repeated point reads versus a shared read snapshot;
+- decoded scans versus DUPSORT equality indexes;
+- streaming versus grouped/sequential index rebuild;
+- row-maintained versus bulk-built indexed initial ingest;
+- edge-materializing graph traversal versus direct adjacency traversal.
+
+Run it locally with:
 
 #+begin_src lisp
 (tek9-bench-compare:run)
 #+end_src
 
-The comparative harness runs with =:full= durability and measures per-document commits versus batching, arbitrary point reads, decoded scans versus secondary indexes, streaming versus sequential index rebuild, and row-maintained versus bulk-built indexed initial ingest. Treat benchmark numbers as machine-specific and compare changes on the same host and dataset.
+CI emits structured benchmark JSON. Successful branch pushes commit the result back into:
+
+#+begin_example
+bench/results/latest.json
+bench/results/history/<git-commit>.json
+#+end_example
+
+The next commit compares against the committed baseline. CI fails when the optimized path is materially slower and its relative advantage also degrades beyond the configured tolerance. Benchmark-result-only commits use =[skip ci]= and are ignored by the workflow trigger, so the write-back cannot loop forever.
 
 ** Close
 
