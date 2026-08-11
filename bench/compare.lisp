@@ -5,9 +5,11 @@
 
 (defpackage :tek9-bench-compare
   (:use :cl :tek9)
-  (:export :run))
+  (:export :run :run-and-write))
 
 (in-package :tek9-bench-compare)
+
+(defvar *results* nil)
 
 (defun fresh-db (path &key (map-size (* 2 1024 1024 1024)))
   (when (uiop:directory-exists-p path)
@@ -24,15 +26,26 @@
     (/ (- (get-internal-real-time) start)
        (float internal-time-units-per-second))))
 
-(defun report-pair (label slow fast)
-  (format t "~&~A~%  reference: ~,6Fs~%  fast:      ~,6Fs~%  speedup:   ~,2Fx~%"
-          label slow fast (if (plusp fast) (/ slow fast) most-positive-fixnum)))
-
-(defun report-normalized-pair (label slow slow-count fast fast-count)
-  (let ((slow-per (/ slow slow-count))
-        (fast-per (/ fast fast-count)))
-    (report-pair label slow-per fast-per)
-    (format t "  samples:   ~D reference / ~D fast~%" slow-count fast-count)))
+(defun record-result (name reference fast &key reference-samples fast-samples)
+  (let* ((reference-per (/ reference (or reference-samples 1)))
+         (fast-per (/ fast (or fast-samples 1)))
+         (speedup (if (plusp fast-per)
+                      (/ reference-per fast-per)
+                      most-positive-fixnum)))
+    (push (list :name name
+                :reference-seconds reference-per
+                :fast-seconds fast-per
+                :speedup speedup
+                :reference-samples (or reference-samples 1)
+                :fast-samples (or fast-samples 1))
+          *results*)
+    (format t "~&~A~%  reference: ~,6Fs~%  fast:      ~,6Fs~%  speedup:   ~,2Fx~%"
+            name reference-per fast-per speedup)
+    (when (or reference-samples fast-samples)
+      (format t "  samples:   ~D reference / ~D fast~%"
+              (or reference-samples 1)
+              (or fast-samples 1)))
+    speedup))
 
 (defun make-documents (count &key buckets)
   (loop for i below count
@@ -66,7 +79,7 @@
                  (elapsed-seconds
                   (lambda ()
                     (put-bulk batched documents :sorted t)))))
-           (report-pair "full-durability write transactions" slow fast))
+           (record-result "full-durability-write-batching" slow fast))
       (close-database individual)
       (close-database batched))))
 
@@ -87,7 +100,7 @@
                    (elapsed-seconds
                     (lambda ()
                       (fetch-bulk db ids)))))
-             (report-pair "point reads: one snapshot each vs one snapshot/cursor" slow fast)))
+             (record-result "bulk-point-read-single-snapshot" slow fast)))
       (close-database db))))
 
 (defun benchmark-secondary-index (count slow-queries buckets)
@@ -122,9 +135,10 @@
                     (lambda ()
                       (loop repeat fast-queries
                             do (select-index db "bucket" needle))))))
-             (report-normalized-pair
-              "selective equality: decoded scan vs DUPSORT index"
-              slow slow-queries fast fast-queries)))
+             (record-result "selective-equality-index"
+                            slow fast
+                            :reference-samples slow-queries
+                            :fast-samples fast-queries)))
       (close-database db))))
 
 (defun benchmark-index-rebuild (count buckets)
@@ -141,8 +155,7 @@
                         (lambda () (rebuild-index streaming "bucket"))))
                  (fast (elapsed-seconds
                         (lambda () (rebuild-index-fast sequential "bucket")))))
-             (report-pair "secondary-index rebuild: random insert vs sorted append"
-                          slow fast)))
+             (record-result "secondary-index-rebuild" slow fast)))
       (close-database streaming)
       (close-database sequential))))
 
@@ -162,8 +175,7 @@
                    (elapsed-seconds
                     (lambda ()
                       (bulk-load bulk-built documents)))))
-             (report-pair "indexed initial load: row-maintained vs bulk-built"
-                          slow fast)))
+             (record-result "indexed-initial-load" slow fast)))
       (close-database row-maintained)
       (close-database bulk-built))))
 
@@ -215,9 +227,10 @@
                                 db center
                                 :database-name graph-name
                                 :predicate "knows"))))))
-             (report-normalized-pair
-              "graph neighbors: edge materialization vs direct adjacency payload"
-              slow queries fast queries)))
+             (record-result "graph-neighbor-direct-adjacency"
+                            slow fast
+                            :reference-samples queries
+                            :fast-samples queries)))
       (close-database db))))
 
 (defun run (&key
@@ -229,6 +242,7 @@
               (buckets 1000)
               (graph-fanout 2000)
               (graph-queries 50))
+  (setf *results* nil)
   (format t "~&Tek9 comparative microbenchmarks (durability=:FULL)~%")
   (benchmark-write-batching write-count)
   (benchmark-bulk-read read-count)
@@ -236,4 +250,48 @@
   (benchmark-index-rebuild index-build-count buckets)
   (benchmark-indexed-initial-load index-build-count buckets)
   (benchmark-graph-neighbors graph-fanout graph-queries)
-  (values))
+  (nreverse *results*))
+
+(defun json-escape (string)
+  (with-output-to-string (out)
+    (loop for character across string
+          do (case character
+               (#\\ (write-string "\\\\" out))
+               (#\" (write-string "\\\"" out))
+               (#\Newline (write-string "\\n" out))
+               (#\Return (write-string "\\r" out))
+               (#\Tab (write-string "\\t" out))
+               (t (write-char character out))))))
+
+(defun write-results-json (pathname results)
+  (ensure-directories-exist pathname)
+  (let ((commit (or (uiop:getenv "BENCHMARK_COMMIT")
+                    (uiop:getenv "GITHUB_SHA")
+                    "unknown")))
+    (with-open-file (stream pathname
+                            :direction :output
+                            :if-exists :supersede
+                            :if-does-not-exist :create)
+      (format stream "{~%  \"schema_version\": 1,~%  \"commit\": \"~A\",~%  \"durability\": \"full\",~%  \"metrics\": {~%"
+              (json-escape commit))
+      (loop for result in results
+            for first = t then nil
+            do (unless first
+                 (format stream ",~%"))
+               (format stream
+                       "    \"~A\": {\"reference_seconds\": ~,9F, \"fast_seconds\": ~,9F, \"speedup\": ~,9F, \"reference_samples\": ~D, \"fast_samples\": ~D}"
+                       (json-escape (getf result :name))
+                       (coerce (getf result :reference-seconds) 'double-float)
+                       (coerce (getf result :fast-seconds) 'double-float)
+                       (coerce (getf result :speedup) 'double-float)
+                       (getf result :reference-samples)
+                       (getf result :fast-samples))
+            finally (format stream "~%  }~%}~%")))))
+
+(defun run-and-write (&optional
+                        (pathname
+                          (or (uiop:getenv "BENCHMARK_JSON")
+                              "bench/results/current.json")))
+  (let ((results (run)))
+    (write-results-json pathname results)
+    results))
