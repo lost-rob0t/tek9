@@ -12,4 +12,7 @@
                (:file "test-graphs"))
   :perform (test-op (operation component)
              (declare (ignore operation component))
-             (uiop:symbol-call :fiveam :run! :tek9-tests)))
+             (let ((results (uiop:symbol-call :fiveam :run :tek9-tests)))
+               (uiop:symbol-call :fiveam :explain! results)
+               (unless (uiop:symbol-call :fiveam :results-status results)
+                 (error "Tek9 test suite failed.")))))
