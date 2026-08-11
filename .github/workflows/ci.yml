@@ -2,7 +2,13 @@ name: CI
 
 on:
   push:
+    paths-ignore:
+      - bench/results/latest.json
+      - bench/results/history/**
   pull_request:
+
+permissions:
+  contents: write
 
 jobs:
   sbcl:
@@ -10,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install native dependencies
         run: |
@@ -33,10 +41,40 @@ jobs:
             --eval '(asdf:test-system :tek9-tests)'
 
       - name: Run comparative microbenchmarks
+        env:
+          BENCHMARK_JSON: /tmp/tek9-benchmark.json
+          BENCHMARK_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           sbcl --non-interactive \
             --load "$HOME/quicklisp/setup.lisp" \
             --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
             --eval '(ql:quickload :tek9)' \
             --load bench/compare.lisp \
-            --eval '(tek9-bench-compare:run)'
+            --eval '(tek9-bench-compare:run-and-write)'
+
+      - name: Fail on benchmark regression
+        run: |
+          python3 bench/check_regression.py \
+            bench/results/latest.json \
+            /tmp/tek9-benchmark.json \
+            --max-regression-pct 5
+
+      - name: Record successful benchmark in repository
+        if: github.event_name == 'push'
+        env:
+          BENCHMARK_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir -p bench/results/history
+          cp /tmp/tek9-benchmark.json bench/results/latest.json
+          cp /tmp/tek9-benchmark.json "bench/results/history/${BENCHMARK_COMMIT}.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bench/results/latest.json bench/results/history/
+
+          if git diff --cached --quiet; then
+            echo "Benchmark JSON unchanged; nothing to commit."
+          else
+            git commit -m "bench: record ${BENCHMARK_COMMIT} [skip ci]"
+            git push
+          fi
