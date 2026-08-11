@@ -91,11 +91,14 @@
          (progn
            (put-bulk db documents :sorted t)
            (fetch db (first ids))
+           ;; Both paths materialize the same (id . document) result shape.
+           ;; The reference pays one read transaction per key; FETCH-BULK
+           ;; shares one snapshot across all direct MDB_GET calls.
            (let ((slow
                    (elapsed-seconds
                     (lambda ()
-                      (dolist (id ids)
-                        (fetch db id)))))
+                      (loop for id in ids
+                            collect (cons id (fetch db id))))))
                  (fast
                    (elapsed-seconds
                     (lambda ()
