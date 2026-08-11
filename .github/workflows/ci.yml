@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sbcl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl liblmdb-dev libffi-dev curl
+
+      - name: Install Quicklisp
+        run: |
+          curl -fsSLO https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive \
+            --load quicklisp.lisp \
+            --eval '(quicklisp-quickstart:install :path (merge-pathnames "quicklisp/" (user-homedir-pathname)))'
+
+      - name: Load and test Tek9
+        run: |
+          sbcl --non-interactive \
+            --load "$HOME/quicklisp/setup.lisp" \
+            --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
+            --eval '(asdf:load-asd (truename "tests/tek9-tests.asd"))' \
+            --eval '(ql:quickload :tek9-tests)' \
+            --eval '(asdf:test-system :tek9-tests)'
