@@ -1,5 +1,5 @@
 ;;;; Comparative Tek9 microbenchmarks for storage-engine regressions.
-;;;; Measures old usage shapes against the v0.2 fast paths on the same build.
+;;;; Measures reference usage shapes against the v0.2 fast paths on the same build.
 
 (in-package :cl-user)
 
@@ -44,6 +44,13 @@
                       :bucket (and buckets
                                    (format nil "b~4,'0d" (mod i buckets)))
                       :payload "tek9-benchmark"))))
+
+(defun register-bucket-index (db)
+  (register-index
+   db
+   "bucket"
+   (lambda (document)
+     (getf (doc-value document) :bucket))))
 
 (defun benchmark-write-batching (count)
   (let ((individual (fresh-db #P"/tmp/tek9-bench-individual/"))
@@ -91,13 +98,8 @@
     (unwind-protect
          (progn
            (put-bulk db documents :sorted t)
-           (register-index
-            db
-            "bucket"
-            (lambda (document)
-              (getf (doc-value document) :bucket)))
+           (register-bucket-index db)
            (rebuild-index db "bucket")
-           ;; Warm equivalent result paths: both produce decoded documents.
            (tek9::%select db
                           :where (lambda (key document)
                                    (declare (ignore key))
@@ -125,14 +127,57 @@
               slow slow-queries fast fast-queries)))
       (close-database db))))
 
+(defun benchmark-index-rebuild (count buckets)
+  (let ((streaming (fresh-db #P"/tmp/tek9-bench-rebuild-streaming/"))
+        (sequential (fresh-db #P"/tmp/tek9-bench-rebuild-sequential/"))
+        (documents (make-documents count :buckets buckets)))
+    (unwind-protect
+         (progn
+           (put-bulk streaming documents :sorted t)
+           (put-bulk sequential documents :sorted t)
+           (register-bucket-index streaming)
+           (register-bucket-index sequential)
+           (let ((slow (elapsed-seconds
+                        (lambda () (rebuild-index streaming "bucket"))))
+                 (fast (elapsed-seconds
+                        (lambda () (rebuild-index-fast sequential "bucket")))))
+             (report-pair "secondary-index rebuild: random insert vs sorted append"
+                          slow fast)))
+      (close-database streaming)
+      (close-database sequential))))
+
+(defun benchmark-indexed-initial-load (count buckets)
+  (let ((row-maintained (fresh-db #P"/tmp/tek9-bench-indexed-load-row/"))
+        (bulk-built (fresh-db #P"/tmp/tek9-bench-indexed-load-bulk/"))
+        (documents (make-documents count :buckets buckets)))
+    (unwind-protect
+         (progn
+           (register-bucket-index row-maintained)
+           (register-bucket-index bulk-built)
+           (let ((slow
+                   (elapsed-seconds
+                    (lambda ()
+                      (put-bulk row-maintained documents :sorted t))))
+                 (fast
+                   (elapsed-seconds
+                    (lambda ()
+                      (bulk-load bulk-built documents)))))
+             (report-pair "indexed initial load: row-maintained vs bulk-built"
+                          slow fast)))
+      (close-database row-maintained)
+      (close-database bulk-built))))
+
 (defun run (&key
               (write-count 1000)
               (read-count 5000)
               (query-count 5000)
               (queries 250)
+              (index-build-count 20000)
               (buckets 1000))
   (format t "~&Tek9 comparative microbenchmarks (durability=:FULL)~%")
   (benchmark-write-batching write-count)
   (benchmark-bulk-read read-count)
   (benchmark-secondary-index query-count queries buckets)
+  (benchmark-index-rebuild index-build-count buckets)
+  (benchmark-indexed-initial-load index-build-count buckets)
   (values))
