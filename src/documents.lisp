@@ -1,11 +1,24 @@
 (in-package :tek9)
 
+(defvar *key-id-lock* (bordeaux-threads:make-lock "tek9-key-id"))
+(defvar *key-id-second* -1)
+(defvar *key-id-sequence* 0)
+
 (defun make-key-id ()
-  "Return a lexicographically sortable ULID string."
-  (multiple-value-bind (ulid-str ulid-bytes)
-      (ulid:ulid)
-    (declare (ignore ulid-bytes))
-    ulid-str))
+  "Return a time-sortable process-safe string id without external UUID dependencies."
+  (bordeaux-threads:with-lock-held (*key-id-lock*)
+    (let ((second (get-universal-time)))
+      (if (= second *key-id-second*)
+          (incf *key-id-sequence*)
+          (setf *key-id-second* second
+                *key-id-sequence* 0))
+      ;; Fixed-width time and sequence prefixes preserve lexical creation order
+      ;; within one process. The random suffix makes cross-process collisions
+      ;; vanishingly unlikely without introducing another storage dependency.
+      (format nil "~12,'0X~8,'0X~16,'0X"
+              second
+              *key-id-sequence*
+              (random #x10000000000000000)))))
 
 (defclass document ()
   ((id :initform (make-key-id) :type string :initarg :id :accessor doc-id)
