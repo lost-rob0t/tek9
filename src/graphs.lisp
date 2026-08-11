@@ -177,6 +177,19 @@ Tek9 environment."
   (lmdb:g3t (graph-dbis-node-map dbis)
             (%external-node-key graph-name external-id)))
 
+(defun %lookup-node-row-cached (dbis graph-name external-id cache)
+  "Resolve EXTERNAL-ID, using CACHE only for the lifetime of the current txn."
+  (if (null cache)
+      (%lookup-node-row dbis graph-name external-id)
+      (multiple-value-bind (row present)
+          (gethash external-id cache)
+        (if present
+            row
+            (let ((resolved (%lookup-node-row dbis graph-name external-id)))
+              (when resolved
+                (setf (gethash external-id cache) resolved))
+              resolved)))))
+
 (defun %ensure-node-row (dbis graph-name external-id)
   (or (%lookup-node-row dbis graph-name external-id)
       (let ((row (%next-row-id (graph-dbis-meta dbis) +next-node-id-key+)))
@@ -200,6 +213,19 @@ Tek9 environment."
 (defun %lookup-predicate-row (dbis predicate)
   (lmdb:g3t (graph-dbis-predicate-map dbis) (princ-to-string predicate)))
 
+(defun %lookup-predicate-row-cached (dbis predicate cache)
+  (let ((key (princ-to-string predicate)))
+    (if (null cache)
+        (lmdb:g3t (graph-dbis-predicate-map dbis) key)
+        (multiple-value-bind (row present)
+            (gethash key cache)
+          (if present
+              row
+              (let ((resolved (lmdb:g3t (graph-dbis-predicate-map dbis) key)))
+                (when resolved
+                  (setf (gethash key cache) resolved))
+                resolved))))))
+
 (defun %ensure-predicate-row (dbis predicate)
   (let ((key (princ-to-string predicate)))
     (or (lmdb:g3t (graph-dbis-predicate-map dbis) key)
@@ -208,6 +234,18 @@ Tek9 environment."
                     +next-predicate-id-key+)))
           (lmdb:put (graph-dbis-predicate-map dbis) key row)
           row))))
+
+(defun %ensure-predicate-row-cached (dbis predicate cache)
+  (let ((key (princ-to-string predicate)))
+    (if (null cache)
+        (%ensure-predicate-row dbis predicate)
+        (multiple-value-bind (row present)
+            (gethash key cache)
+          (if (and present row)
+              row
+              (let ((resolved (%ensure-predicate-row dbis predicate)))
+                (setf (gethash key cache) resolved)
+                resolved))))))
 
 (defun edge-key (edge)
   "Return EDGE's stable external identity."
@@ -274,11 +312,15 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
 (defun %delete-adjacency (db key neighbor-row edge-row)
   (lmdb:del db key :value (%adjacency-value neighbor-row edge-row)))
 
-(defun %remove-edge-adjacency (dbis graph-name edge-row edge)
+(defun %remove-edge-adjacency (dbis graph-name edge-row edge
+                               &key node-cache predicate-cache)
   "Remove EDGE's current adjacency entries in the active write transaction."
-  (let* ((source-row (%lookup-node-row dbis graph-name (edge-source edge)))
-         (target-row (%lookup-node-row dbis graph-name (edge-target edge)))
-         (predicate-row (%lookup-predicate-row dbis (edge-predicate edge))))
+  (let* ((source-row (%lookup-node-row-cached
+                      dbis graph-name (edge-source edge) node-cache))
+         (target-row (%lookup-node-row-cached
+                      dbis graph-name (edge-target edge) node-cache))
+         (predicate-row (%lookup-predicate-row-cached
+                         dbis (edge-predicate edge) predicate-cache)))
     (when (and source-row target-row)
       (%delete-adjacency (graph-dbis-out dbis)
                          source-row target-row edge-row)
@@ -292,10 +334,12 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
                            (%predicate-adjacency-key target-row predicate-row)
                            source-row edge-row)))))
 
-(defun %insert-edge (dbis graph-name edge)
+(defun %insert-edge (dbis graph-name edge &key node-cache predicate-cache)
   "Insert or replace one EDGE in the active write transaction."
-  (let* ((source-row (%lookup-node-row dbis graph-name (edge-source edge)))
-         (target-row (%lookup-node-row dbis graph-name (edge-target edge))))
+  (let* ((source-row (%lookup-node-row-cached
+                      dbis graph-name (edge-source edge) node-cache))
+         (target-row (%lookup-node-row-cached
+                      dbis graph-name (edge-target edge) node-cache)))
     (unless source-row
       (error "Unknown source node ~S in graph ~S."
              (edge-source edge) graph-name))
@@ -305,13 +349,16 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
     (let* ((existing-row (%lookup-edge-row dbis graph-name (edge-id edge)))
            (edge-row (or existing-row
                          (%ensure-edge-row dbis graph-name (edge-id edge))))
-           (predicate-row (%ensure-predicate-row dbis (edge-predicate edge))))
+           (predicate-row (%ensure-predicate-row-cached
+                           dbis (edge-predicate edge) predicate-cache)))
       (when existing-row
         (let ((previous-bytes (lmdb:g3t (graph-dbis-edges dbis) edge-row)))
           (when previous-bytes
             (%remove-edge-adjacency
              dbis graph-name edge-row
-             (%decode-document-or-object previous-bytes)))))
+             (%decode-document-or-object previous-bytes)
+             :node-cache node-cache
+             :predicate-cache predicate-cache))))
       (lmdb:put (graph-dbis-edges dbis) edge-row (%* edge))
       (%put-adjacency (graph-dbis-out dbis)
                       source-row target-row edge-row)
@@ -325,15 +372,29 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
                       source-row edge-row)
       edge-row)))
 
-(defun put-edges (database edges &key (database-name (get-default-graph-db)))
-  "Persist EDGES and every adjacency index atomically.
-
-External strings are resolved once at the boundary. The hot graph keyspaces use
-uint64 node/edge/predicate IDs and fixed 16-byte adjacency records."
+(defun %put-edges-uncached (database edges
+                            &key (database-name (get-default-graph-db)))
+  "Reference batch-ingest path used by the benchmark regression suite."
   (let ((dbis (ensure-graph-dbs database)))
     (with-database (database :write t)
       (dolist (edge edges)
         (%insert-edge dbis database-name edge)))
+    edges))
+
+(defun put-edges (database edges &key (database-name (get-default-graph-db)))
+  "Persist EDGES and every adjacency index atomically.
+
+External node and predicate IDs are memoized only for this write transaction.
+The cache removes repeated string-key LMDB lookups in fan-out/fan-in batches but
+never outlives the transaction, so LMDB remains the source of truth."
+  (let ((dbis (ensure-graph-dbs database))
+        (node-cache (make-hash-table :test #'equal))
+        (predicate-cache (make-hash-table :test #'equal)))
+    (with-database (database :write t)
+      (dolist (edge edges)
+        (%insert-edge dbis database-name edge
+                      :node-cache node-cache
+                      :predicate-cache predicate-cache)))
     edges))
 
 (defun put-edges* (database edge-list &key (database-name (get-default-graph-db)))
