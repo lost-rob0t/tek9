@@ -20,9 +20,10 @@
    :fetch :fetch* :fetch-bulk :fetch-bulk* :delete-document
    ;; indexes and query
    :secondary-index :register-index :unregister-index :rebuild-index
-   :clear-index :secondary-index-by-name :index-name :index-source-db
-   :index-key-type :index-unique-p :index-document-ids :index-fetch
-   :select :select-primary-range :select-index :select-index-range
+   :rebuild-index-fast :bulk-load :clear-index :secondary-index-by-name
+   :index-name :index-source-db :index-key-type :index-unique-p
+   :index-document-ids :index-fetch :select :select-primary-range
+   :select-index :select-index-range
    ;; graph
    :node :node-id :node-props :node-edges :edge :edge-source :edge-predicate
    :edge-target :edge-key :get-default-graph-db :get-graph-db :put-node
