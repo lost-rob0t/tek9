@@ -55,7 +55,7 @@
             (setf (gethash key groups) id))
           ;; Do not globally sort (key . id) pairs. Group postings in O(1),
           ;; then sort the distinct keys and each usually-small posting list.
-          (push id (gethash key groups))))))
+          (push id (gethash key groups)))))
   groups)
 
 (defun %index-groups-for-documents (index documents)
