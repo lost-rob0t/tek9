@@ -27,19 +27,46 @@
                  :name name))
 
 (defmacro define-map (view &body body)
-  `(setf (view-map ,view)
-         (lambda (doc)
-           (let ((result nil))
-             (labels ((emit (key value)
-                        (push (cons key value) result)))
-               ,@body)
-             (nreverse result)))))
+  "Install a mapper on VIEW while binding caller-visible DOC and EMIT symbols.
+
+The historical macro introduced TEK9-internal DOC/EMIT bindings, which meant a
+caller in another package read different symbols in BODY. Resolve the actual
+symbols present in BODY so normal exported-macro use works across packages."
+  (labels ((find-named-symbol (name form)
+             (cond
+               ((symbolp form)
+                (and (string= (symbol-name form) name) form))
+               ((consp form)
+                (or (find-named-symbol name (car form))
+                    (find-named-symbol name (cdr form)))))))
+    (let ((doc-symbol (or (find-named-symbol "DOC" body)
+                          (gensym "DOC")))
+          (emit-symbol (or (find-named-symbol "EMIT" body)
+                           (gensym "EMIT")))
+          (result-symbol (gensym "RESULT")))
+      `(setf (view-map ,view)
+             (lambda (,doc-symbol)
+               (let ((,result-symbol nil))
+                 (labels ((,emit-symbol (key value)
+                            (push (cons key value) ,result-symbol)))
+                   ,@body)
+                 (nreverse ,result-symbol)))))))
 
 (defmacro define-reduce (view &body body)
-  `(setf (view-reduce ,view)
-         (lambda (rows)
-           (declare (ignorable rows))
-           ,@body)))
+  "Install a reducer on VIEW while binding the caller-visible ROWS symbol."
+  (labels ((find-named-symbol (name form)
+             (cond
+               ((symbolp form)
+                (and (string= (symbol-name form) name) form))
+               ((consp form)
+                (or (find-named-symbol name (car form))
+                    (find-named-symbol name (cdr form)))))))
+    (let ((rows-symbol (or (find-named-symbol "ROWS" body)
+                           (gensym "ROWS"))))
+      `(setf (view-reduce ,view)
+             (lambda (,rows-symbol)
+               (declare (ignorable ,rows-symbol))
+               ,@body)))))
 
 (defun create-view-db (database view)
   (database-db database

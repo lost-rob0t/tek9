@@ -5,9 +5,13 @@
   (let ((db (setup-db #P"/tmp/test-tek9-views/")))
     (unwind-protect
          (let ((view (new-view "people-by-id" nil)))
+           ;; These exported macros must bind symbols read in the caller's package.
            (define-map view
              (when (string= "person" (getf (doc-value doc) :dtype))
                (emit (doc-id doc) (getf (doc-value doc) :name))))
+           (define-reduce view
+             (length rows))
+           (is (= 3 (funcall (tek9::view-reduce view) '(a b c))))
            (add-view db view)
 
            (put-bulk db
