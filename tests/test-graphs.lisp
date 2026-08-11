@@ -82,3 +82,46 @@
                                              :database-name graph-name
                                              :predicate "knows")))))
       (close-database db))))
+
+(test replacing-edge-rewrites-adjacency
+  (let ((db (setup-db #P"/tmp/test-tek9-edge-replace/"))
+        (graph-name "replace"))
+    (unwind-protect
+         (progn
+           (put-nodes db
+                      (list (make-instance 'node :id "a")
+                            (make-instance 'node :id "b")
+                            (make-instance 'node :id "c"))
+                      :database-name graph-name)
+           (put-edge db
+                     (make-instance 'edge
+                                    :id "edge"
+                                    :source "a"
+                                    :predicate "knows"
+                                    :target "b")
+                     :database-name graph-name)
+           (is (equal '("b")
+                      (mapcar #'node-id
+                              (fetch-node-neighbors db "a"
+                                                    :database-name graph-name
+                                                    :predicate "knows"))))
+           (put-edge db
+                     (make-instance 'edge
+                                    :id "edge"
+                                    :source "a"
+                                    :predicate "works-with"
+                                    :target "c")
+                     :database-name graph-name)
+           (is (null (fetch-node-neighbors db "a"
+                                            :database-name graph-name
+                                            :predicate "knows")))
+           (is (equal '("c")
+                      (mapcar #'node-id
+                              (fetch-node-neighbors db "a"
+                                                    :database-name graph-name
+                                                    :predicate "works-with"))))
+           (is (null (fetch-node-neighbors db "b"
+                                            :database-name graph-name
+                                            :incoming t
+                                            :predicate "knows"))))
+      (close-database db))))
