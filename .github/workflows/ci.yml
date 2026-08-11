@@ -51,6 +51,8 @@ jobs:
 
       - name: Benchmark parent and current on same runner
         run: |
+          HARNESS="$GITHUB_WORKSPACE/bench/compare.lisp"
+
           run_bench() {
             root="$1"
             output="$2"
@@ -63,11 +65,12 @@ jobs:
                 --load "$HOME/quicklisp/setup.lisp" \
                 --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
                 --eval '(ql:quickload :tek9)' \
-                --load bench/compare.lisp \
+                --load "$HARNESS" \
                 --eval '(tek9-bench-compare:run-and-write)'
             )
           }
 
+          # Both revisions use the current benchmark harness and workloads.
           # Alternate order so neither revision always gets the warmer CPU/cache state.
           run_bench /tmp/tek9-baseline /tmp/base-1.json "$BASE_SHA"
           run_bench "$GITHUB_WORKSPACE" /tmp/current-1.json "$CURRENT_SHA"
