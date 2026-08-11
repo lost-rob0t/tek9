@@ -98,15 +98,21 @@ composite key so Tek9 needs a constant number of LMDB named databases."
 (defun put-nodes (database nodes &key (database-name (get-default-graph-db)) sorted)
   "Persist NODES in one transaction.
 
-SORTED means NODE ids are ordered within DATABASE-NAME, allowing LMDB's append
-fast path because every generated storage key shares the same graph prefix."
+SORTED is a safe performance hint. Tek9 enables LMDB's append path only when
+the first graph-qualified key is beyond the entire shared node DB."
   (let ((db (get-graph-db database)))
     (with-database (database :write t)
-      (dolist (node nodes)
-        (lmdb:put db
-                  (%graph-node-key database-name (node-id node))
-                  (%* node)
-                  :append sorted)))
+      (let ((append-p
+              (and sorted
+                   nodes
+                   (%append-safe-p
+                    db
+                    (%graph-node-key database-name (node-id (first nodes)))))))
+        (dolist (node nodes)
+          (lmdb:put db
+                    (%graph-node-key database-name (node-id node))
+                    (%* node)
+                    :append append-p))))
     nodes))
 
 (defun fetch-node (database id &key (database-name (get-default-graph-db)))
