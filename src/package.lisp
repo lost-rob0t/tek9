@@ -12,8 +12,14 @@
    ;; database
    :database :new-database :open-database :close-database :db-is-open-p
    :db-path :db-env :db-name :db-max-size :db-max-dbs :db-max-readers
-   :db-durability :db-count :db-changed :db-views :database-db
-   :database-stats :map-database :with-database :clear-changes
+   :db-durability :db-count :db-changed :db-views :db-index-definitions
+   :database-db :database-stats :map-database :with-database :clear-changes
+   ;; declarative indexes
+   :index-definition :new-index-definition :*index-definitions*
+   :index-definition-name :index-definition-key-fn
+   :index-definition-database-name :index-definition-key-type
+   :index-definition-unique-p :index-definition-multi-valued-p
+   :register-index-definition
    ;; documents
    :document :new-document :doc-id :doc-value :doc-changed :touch-document
    :untouch-document :make-key-id :put :put* :put-bulk :put-bulk* :put-json

@@ -138,6 +138,17 @@ sorted document ids without storing per-key Lisp lists."
       (rebuild-index database name))
     index))
 
+(defmethod register-index-definition
+    ((database database) (definition index-definition))
+  "Rehydrate one process-local index object from declarative configuration."
+  (register-index database
+                  (index-definition-name definition)
+                  (index-definition-key-fn definition)
+                  :database-name (index-definition-database-name definition)
+                  :key-type (index-definition-key-type definition)
+                  :unique (index-definition-unique-p definition)
+                  :multi-valued (index-definition-multi-valued-p definition)))
+
 (defun unregister-index (database name)
   "Remove an index definition from the current Tek9 process.
 

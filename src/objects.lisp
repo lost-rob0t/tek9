@@ -11,6 +11,55 @@
 
 (defvar *db* nil "Convenience database variable used by the REPL examples.")
 
+(defclass index-definition ()
+  ((name :initarg :name :reader index-definition-name)
+   (key-fn :initarg :key-fn :reader index-definition-key-fn)
+   (database-name :initarg :database-name
+                  :initform +main-name+
+                  :reader index-definition-database-name)
+   (key-type :initarg :key-type
+             :initform :string
+             :reader index-definition-key-type)
+   (unique :initarg :unique
+           :initform nil
+           :reader index-definition-unique-p)
+   (multi-valued :initarg :multi-valued
+                 :initform nil
+                 :reader index-definition-multi-valued-p))
+  (:documentation
+   "Declarative secondary-index configuration reapplied when a database opens."))
+
+(defun new-index-definition (name key-fn
+                             &key
+                               (database-name +main-name+)
+                               (key-type :string)
+                               unique
+                               multi-valued)
+  "Create a reusable declarative secondary-index definition.
+
+INDEX-DEFINITION objects contain Lisp extractor functions, so they are process
+configuration rather than serialized database metadata. OPEN-DATABASE reapplies
+them to the durable LMDB index DBs on every process start."
+  (check-type name string)
+  (check-type key-fn function)
+  (check-type database-name string)
+  (check-type key-type (member :string :uint64))
+  (make-instance 'index-definition
+                 :name name
+                 :key-fn key-fn
+                 :database-name database-name
+                 :key-type key-type
+                 :unique unique
+                 :multi-valued multi-valued))
+
+(defparameter *index-definitions* nil
+  "Default index registry consulted by OPEN-DATABASE.
+
+Set this to a list of INDEX-DEFINITION objects for application-wide automatic
+index rehydration. A DATABASE can override the global registry through
+NEW-DATABASE or OPEN-DATABASE :INDEX-DEFINITIONS. Explicit NIL disables
+automatic registration for that database.")
+
 (defclass database ()
   ((path :initarg :path :initform nil :accessor db-path)
    (env :initarg :env :initform nil :accessor db-env)
@@ -18,6 +67,9 @@
    (open :initform nil :accessor db-open?)
    (handles :initform (make-hash-table :test #'equal) :accessor db-handles)
    (indexes :initform (make-hash-table :test #'equal) :accessor db-indexes)
+   (index-definitions :initarg :index-definitions
+                      :initform :default
+                      :accessor db-index-definitions)
    (views :initarg :views :accessor db-views :initform (dict))
    (document-count :initarg :count :initform 0 :accessor db-count)
    (changes :initform (make-array 64 :adjustable t :fill-pointer 0)
@@ -50,7 +102,13 @@ because GET-DB performs a linear lookup through opened DB handles."))
                        (max-size +default-map-size+)
                        (max-dbs +default-max-dbs+)
                        (max-readers 126)
-                       (durability :full))
+                       (durability :full)
+                       (index-definitions :default))
+  "Create a Tek9 database handle.
+
+INDEX-DEFINITIONS defaults to :DEFAULT, meaning OPEN-DATABASE reads the current
+value of *INDEX-DEFINITIONS*. Pass a list to use database-specific definitions,
+or NIL to disable automatic index registration."
   (uiop:ensure-all-directories-exist (list path))
   (make-instance 'database
                  :name name
@@ -58,7 +116,8 @@ because GET-DB performs a linear lookup through opened DB handles."))
                  :size max-size
                  :max-dbs max-dbs
                  :max-readers max-readers
-                 :durability durability))
+                 :durability durability
+                 :index-definitions index-definitions))
 
 (defun database-db (database name
                      &key
@@ -89,13 +148,40 @@ handles are cached to avoid repeated wrapper-level linear handle lookup."
                          :reverse-dup reverse-dup
                          :dupfixed dupfixed))))
 
-(defmethod open-database ((db database) &key max-dbs max-readers)
-  "Open DB and pre-open the main document keyspace.
+(defgeneric register-index-definition (database definition)
+  (:documentation
+   "Register one declarative INDEX-DEFINITION against an open DATABASE."))
+
+(defun %effective-index-definitions (database)
+  (let ((configured (db-index-definitions database)))
+    (if (eq configured :default)
+        *index-definitions*
+        configured)))
+
+(defun %register-configured-indexes (database)
+  "Rehydrate DATABASE's process-local index objects from declarative config."
+  (dolist (definition (%effective-index-definitions database) database)
+    (register-index-definition database definition)))
+
+(defmethod open-database ((db database)
+                          &key
+                            max-dbs
+                            max-readers
+                            (index-definitions nil index-definitions-supplied-p))
+  "Open DB, pre-open the main keyspace, and rehydrate configured indexes.
 
 The default durability profile is fully ACID. :METADATA-LAZY keeps atomicity,
 consistency and isolation while allowing the last committed transaction to be
-lost on a system crash. :NOSYNC is opt-in and intended only for rebuildable data."
+lost on a system crash. :NOSYNC is opt-in and intended only for rebuildable data.
+
+INDEX-DEFINITIONS overrides the registry stored on DB. When no override is
+provided, a DB configured with :DEFAULT reads *INDEX-DEFINITIONS* at open time."
+  (when index-definitions-supplied-p
+    (setf (db-index-definitions db) index-definitions))
   (when (db-is-open-p db)
+    (when index-definitions-supplied-p
+      (clrhash (db-indexes db))
+      (%register-configured-indexes db))
     (return-from open-database db))
   (multiple-value-bind (sync meta-sync)
       (durability-options (db-durability db))
@@ -109,19 +195,27 @@ lost on a system crash. :NOSYNC is opt-in and intended only for rebuildable data
                               :meta-sync meta-sync)))
       (setf (db-env db) env)
       (clrhash (db-handles db))
+      (clrhash (db-indexes db))
       (database-db db +main-name+
                    :key-encoding :utf-8
                    :value-encoding :octets)
       (setf (db-open? db) t)
-      db)))
+      (handler-case
+          (progn
+            (%register-configured-indexes db)
+            db)
+        (error (condition)
+          (close-database db)
+          (error condition))))))
 
 (defmethod close-database ((db database))
-  "Close DB if open and invalidate cached named DB handles."
+  "Close DB and invalidate cached LMDB and secondary-index handles."
   (when (db-is-open-p db)
     (lmdb:close-env (db-env db)))
   (setf (db-env db) nil
         (db-open? db) nil)
   (clrhash (db-handles db))
+  (clrhash (db-indexes db))
   db)
 
 (defmacro with-database ((database &key (write nil)) &body body)
