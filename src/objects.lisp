@@ -3,11 +3,11 @@
 (defconstant +main-name+ "std"
   "Main document database name inside an LMDB environment.")
 
-(defconstant +default-map-size+ (* 1024 1024 1024)
-  "Default LMDB map size: 1 GiB of virtual address space.")
+(defconstant +default-map-size+ (* 16 1024 1024 1024)
+  "Default LMDB map size: 16 GiB of virtual address space.")
 
 (defconstant +default-max-dbs+ 64
-  "Default number of named LMDB databases reserved for indexes and graph keyspaces.")
+  "Default number of named LMDB databases reserved for indexes, views, and graph keyspaces.")
 
 (defvar *db* nil "Convenience database variable used by the REPL examples.")
 
@@ -135,6 +135,27 @@ WITH-TXN commits automatically on normal return and aborts on non-local exit."
                      :sync sync
                      :meta-sync meta-sync)
        ,@body)))
+
+(defun %ordered-key< (left right)
+  (etypecase left
+    (string
+     (check-type right string)
+     (string< left right))
+    (integer
+     (check-type right integer)
+     (< left right))))
+
+(defun %append-safe-p (db first-key)
+  "Return true when FIRST-KEY is strictly after DB's current final key.
+
+Must be called inside an active transaction. This turns Tek9's sorted-load flag
+into a safe optimization hint instead of blindly asserting MDB_APPEND."
+  (lmdb:with-cursor (cursor db)
+    (multiple-value-bind (last-key last-value found)
+        (lmdb:cursor-last cursor)
+      (declare (ignore last-value))
+      (or (not found)
+          (%ordered-key< last-key first-key)))))
 
 (defun database-stats (database &key (database-name +main-name+))
   "Return environment and named-database statistics without scanning data."
