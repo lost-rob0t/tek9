@@ -124,16 +124,17 @@ lost on a system crash. :NOSYNC is opt-in and intended only for rebuildable data
   (clrhash (db-handles db))
   db)
 
-(defmacro with-database ((database &key (write nil) (sync t) (meta-sync t))
-                         &body body)
-  "Execute BODY in one LMDB transaction.
+(defmacro with-database ((database &key (write nil)) &body body)
+  "Execute BODY in one LMDB transaction using DATABASE's durability profile.
 
 WITH-TXN commits automatically on normal return and aborts on non-local exit."
-  `(lmdb:with-txn (:env (db-env ,database)
-                   :write ,write
-                   :sync ,sync
-                   :meta-sync ,meta-sync)
-     ,@body))
+  `(multiple-value-bind (sync meta-sync)
+       (durability-options (db-durability ,database))
+     (lmdb:with-txn (:env (db-env ,database)
+                     :write ,write
+                     :sync sync
+                     :meta-sync meta-sync)
+       ,@body)))
 
 (defun database-stats (database &key (database-name +main-name+))
   "Return environment and named-database statistics without scanning data."
