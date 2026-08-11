@@ -24,6 +24,69 @@
            (is (= 2 (length (index-document-ids db "dtype" "organization")))))
       (close-database db))))
 
+(test fast-index-rebuild
+  (let ((db (setup-db #P"/tmp/test-tek9-fast-index/")))
+    (unwind-protect
+         (progn
+           (put-bulk db
+                     (list (new-document :id "d3" :value '(:tag "b"))
+                           (new-document :id "d1" :value '(:tag "a"))
+                           (new-document :id "d2" :value '(:tag "a"))))
+           (register-index db
+                           "tag"
+                           (lambda (document)
+                             (getf (doc-value document) :tag)))
+           (rebuild-index-fast db "tag")
+           (is (equal '("d1" "d2")
+                      (index-document-ids db "tag" "a")))
+           (is (equal '("d3")
+                      (index-document-ids db "tag" "b"))))
+      (close-database db))))
+
+(test atomic-bulk-load
+  (let ((db (setup-db #P"/tmp/test-tek9-bulk-load/")))
+    (unwind-protect
+         (progn
+           (register-index db
+                           "dtype"
+                           (lambda (document)
+                             (getf (doc-value document) :dtype)))
+           (bulk-load db
+                      (list (new-document :id "p2"
+                                          :value '(:dtype "person" :name "Grace"))
+                            (new-document :id "o1"
+                                          :value '(:dtype "organization" :name "ACME"))
+                            (new-document :id "p1"
+                                          :value '(:dtype "person" :name "Ada"))))
+           (is (equal '("p1" "p2")
+                      (index-document-ids db "dtype" "person")))
+           (is (equal "Ada" (getf (fetch* db "p1") :name)))
+           (signals error
+             (bulk-load db
+                        (list (new-document :id "again"
+                                            :value '(:dtype "person"))))))
+      (close-database db))))
+
+(test bulk-load-unique-rollback
+  (let ((db (setup-db #P"/tmp/test-tek9-bulk-load-rollback/")))
+    (unwind-protect
+         (progn
+           (register-index db
+                           "email"
+                           (lambda (document)
+                             (getf (doc-value document) :email))
+                           :unique t)
+           (signals error
+             (bulk-load db
+                        (list (new-document :id "p1"
+                                            :value '(:email "same@example.test"))
+                              (new-document :id "p2"
+                                            :value '(:email "same@example.test")))))
+           (is (null (fetch db "p1")))
+           (is (null (fetch db "p2")))
+           (is (null (index-document-ids db "email" "same@example.test"))))
+      (close-database db))))
+
 (test primary-range
   (let ((db (setup-db #P"/tmp/test-tek9-range/")))
     (unwind-protect
