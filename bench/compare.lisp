@@ -25,8 +25,14 @@
        (float internal-time-units-per-second))))
 
 (defun report-pair (label slow fast)
-  (format t "~&~A~%  reference: ~,4Fs~%  fast:      ~,4Fs~%  speedup:   ~,2Fx~%"
+  (format t "~&~A~%  reference: ~,6Fs~%  fast:      ~,6Fs~%  speedup:   ~,2Fx~%"
           label slow fast (if (plusp fast) (/ slow fast) most-positive-fixnum)))
+
+(defun report-normalized-pair (label slow slow-count fast fast-count)
+  (let ((slow-per (/ slow slow-count))
+        (fast-per (/ fast fast-count)))
+    (report-pair label slow-per fast-per)
+    (format t "  samples:   ~D reference / ~D fast~%" slow-count fast-count)))
 
 (defun make-documents (count &key buckets)
   (loop for i below count
@@ -64,7 +70,6 @@
     (unwind-protect
          (progn
            (put-bulk db documents :sorted t)
-           ;; Warm the mapping before timing transaction/cursor overhead.
            (fetch db (first ids))
            (let ((slow
                    (elapsed-seconds
@@ -78,10 +83,11 @@
              (report-pair "point reads: one snapshot each vs one snapshot/cursor" slow fast)))
       (close-database db))))
 
-(defun benchmark-secondary-index (count queries buckets)
+(defun benchmark-secondary-index (count slow-queries buckets)
   (let* ((db (fresh-db #P"/tmp/tek9-bench-index/"))
          (documents (make-documents count :buckets buckets))
-         (needle (format nil "b~4,'0d" (floor buckets 2))))
+         (needle (format nil "b~4,'0d" (floor buckets 2)))
+         (fast-queries (max 10000 (* slow-queries 40))))
     (unwind-protect
          (progn
            (put-bulk db documents :sorted t)
@@ -91,31 +97,32 @@
             (lambda (document)
               (getf (doc-value document) :bucket)))
            (rebuild-index db "bucket")
-           ;; Warm both code paths.
+           ;; Warm equivalent result paths: both produce decoded documents.
            (tek9::%select db
                           :where (lambda (key document)
                                    (declare (ignore key))
                                    (equal needle
                                           (getf (doc-value document) :bucket))))
-           (index-document-ids db "bucket" needle)
+           (select-index db "bucket" needle)
            (let ((slow
                    (elapsed-seconds
                     (lambda ()
-                      (dotimes (i queries)
-                        (declare (ignore i))
-                        (tek9::%select
-                         db
-                         :where (lambda (key document)
-                                  (declare (ignore key))
-                                  (equal needle
-                                         (getf (doc-value document) :bucket))))))))
+                      (loop repeat slow-queries
+                            do (tek9::%select
+                                db
+                                :where (lambda (key document)
+                                         (declare (ignore key))
+                                         (equal needle
+                                                (getf (doc-value document)
+                                                      :bucket))))))))
                  (fast
                    (elapsed-seconds
                     (lambda ()
-                      (dotimes (i queries)
-                        (declare (ignore i))
-                        (index-document-ids db "bucket" needle))))))
-             (report-pair "selective equality: decoded scan vs DUPSORT index" slow fast)))
+                      (loop repeat fast-queries
+                            do (select-index db "bucket" needle))))))
+             (report-normalized-pair
+              "selective equality: decoded scan vs DUPSORT index"
+              slow slow-queries fast fast-queries)))
       (close-database db))))
 
 (defun run (&key
