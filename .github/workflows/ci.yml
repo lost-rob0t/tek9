@@ -14,9 +14,10 @@ jobs:
   sbcl:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout current commit
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Install native dependencies
@@ -40,33 +41,70 @@ jobs:
             --eval '(ql:quickload :tek9-tests)' \
             --eval '(asdf:test-system :tek9-tests)'
 
-      - name: Run comparative microbenchmarks
-        env:
-          BENCHMARK_JSON: /tmp/tek9-benchmark.json
-          BENCHMARK_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Prepare parent commit benchmark
         run: |
-          sbcl --non-interactive \
-            --load "$HOME/quicklisp/setup.lisp" \
-            --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
-            --eval '(ql:quickload :tek9)' \
-            --load bench/compare.lisp \
-            --eval '(tek9-bench-compare:run-and-write)'
+          CURRENT_SHA="$(git rev-parse HEAD)"
+          BASE_SHA="$(git rev-parse HEAD^)"
+          echo "CURRENT_SHA=${CURRENT_SHA}" >> "$GITHUB_ENV"
+          echo "BASE_SHA=${BASE_SHA}" >> "$GITHUB_ENV"
+          git worktree add --detach /tmp/tek9-baseline "$BASE_SHA"
 
-      - name: Fail on benchmark regression
+      - name: Benchmark parent and current on same runner
+        run: |
+          run_bench() {
+            root="$1"
+            output="$2"
+            commit="$3"
+            (
+              cd "$root"
+              BENCHMARK_JSON="$output" \
+              BENCHMARK_COMMIT="$commit" \
+              sbcl --non-interactive \
+                --load "$HOME/quicklisp/setup.lisp" \
+                --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
+                --eval '(ql:quickload :tek9)' \
+                --load bench/compare.lisp \
+                --eval '(tek9-bench-compare:run-and-write)'
+            )
+          }
+
+          # Alternate order so neither revision always gets the warmer CPU/cache state.
+          run_bench /tmp/tek9-baseline /tmp/base-1.json "$BASE_SHA"
+          run_bench "$GITHUB_WORKSPACE" /tmp/current-1.json "$CURRENT_SHA"
+
+          run_bench "$GITHUB_WORKSPACE" /tmp/current-2.json "$CURRENT_SHA"
+          run_bench /tmp/tek9-baseline /tmp/base-2.json "$BASE_SHA"
+
+          run_bench /tmp/tek9-baseline /tmp/base-3.json "$BASE_SHA"
+          run_bench "$GITHUB_WORKSPACE" /tmp/current-3.json "$CURRENT_SHA"
+
+          run_bench "$GITHUB_WORKSPACE" /tmp/current-4.json "$CURRENT_SHA"
+          run_bench /tmp/tek9-baseline /tmp/base-4.json "$BASE_SHA"
+
+          python3 bench/aggregate_results.py \
+            --output /tmp/tek9-baseline-median.json \
+            --commit "$BASE_SHA" \
+            /tmp/base-1.json /tmp/base-2.json /tmp/base-3.json /tmp/base-4.json
+
+          python3 bench/aggregate_results.py \
+            --output /tmp/tek9-benchmark.json \
+            --commit "$CURRENT_SHA" \
+            --baseline-commit "$BASE_SHA" \
+            /tmp/current-1.json /tmp/current-2.json /tmp/current-3.json /tmp/current-4.json
+
+      - name: Fail if this commit is slower
         run: |
           python3 bench/check_regression.py \
-            bench/results/latest.json \
+            /tmp/tek9-baseline-median.json \
             /tmp/tek9-benchmark.json \
             --max-regression-pct 5
 
       - name: Record successful benchmark in repository
         if: github.event_name == 'push'
-        env:
-          BENCHMARK_COMMIT: ${{ github.sha }}
         run: |
           mkdir -p bench/results/history
           cp /tmp/tek9-benchmark.json bench/results/latest.json
-          cp /tmp/tek9-benchmark.json "bench/results/history/${BENCHMARK_COMMIT}.json"
+          cp /tmp/tek9-benchmark.json "bench/results/history/${CURRENT_SHA}.json"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -74,7 +112,16 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "Benchmark JSON unchanged; nothing to commit."
-          else
-            git commit -m "bench: record ${BENCHMARK_COMMIT} [skip ci]"
-            git push
+            exit 0
           fi
+
+          # Do not overwrite newer user work if the branch advanced while CI ran.
+          git fetch origin "$GITHUB_REF_NAME"
+          REMOTE_SHA="$(git rev-parse "origin/$GITHUB_REF_NAME")"
+          if [ "$REMOTE_SHA" != "$CURRENT_SHA" ]; then
+            echo "Branch advanced to $REMOTE_SHA; skipping benchmark write-back."
+            exit 0
+          fi
+
+          git commit -m "bench: record ${CURRENT_SHA} [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
