@@ -1,117 +1,137 @@
 (in-package :tek9)
 
-
-
-
-;; XXX This is a var that stores a function that sets the uuid
-;; By default it is set my cl-ulid
-;; It must return bytes!
-
 (defun make-key-id ()
-  (multiple-value-bind (ulid-str ulid-bytes) (ulid:ulid) ulid-str))
+  "Return a lexicographically sortable ULID string."
+  (multiple-value-bind (ulid-str ulid-bytes)
+      (ulid:ulid)
+    (declare (ignore ulid-bytes))
+    ulid-str))
 
-
-
-;; Object to hold our Key value pairs in
-;; Maybe it should be a struct or could just be a cons pair?
-;; This is the main object that represents the document!
 (defclass document ()
   ((id :initform (make-key-id) :type string :initarg :id :accessor doc-id)
    (value :initform nil :initarg :value :accessor doc-value)
    (changed :initform nil :initarg :changed :accessor doc-changed)))
 
-(export 'document)
-
 (conspack:defencoding document
   id value changed)
-
-
 
 (defun new-document (&rest keys-vals)
   (apply #'make-instance 'document keys-vals))
 
-
-
-;; Touch a document. this is how I keep track of changed documents!
-;; It returns the document
-
 (defun touch-document (database document)
+  "Mark DOCUMENT dirty and append its id to DATABASE's change vector."
   (setf (doc-changed document) t)
-  (setf (db-changed database) (push (doc-id document) (db-changed database)))
+  (vector-push-extend (doc-id document) (db-changed database))
   document)
 
-
 (defun untouch-document (document)
-  (setf (doc-changed document) nil))
+  (setf (doc-changed document) nil)
+  document)
 
-;; Put a key
+(defun %decode-document (bytes)
+  (and bytes ($ bytes)))
 
+(defun %main-db (database database-name)
+  (database-db database database-name
+               :key-encoding :utf-8
+               :value-encoding :octets))
 
-(defun put (database document)
-  (let* ((env (db-env database))
-         (db (lmdb:get-db +main-name+ :env env))
-         ;; Updating the changed flag!
+(defun put (database document &key (database-name +main-name+))
+  "Insert or replace DOCUMENT in one ACID transaction.
+
+Secondary indexes are maintained in the same LMDB transaction as the document."
+  (let* ((db (%main-db database database-name))
+         (indexes (secondary-indexes-for database database-name))
          (document (touch-document database document)))
-    (lmdb:with-txn (:env env :write t)
-      (lmdb:put db (doc-id document) (%* document))
-      (lmdb:commit-txn env))))
+    (with-database (database :write t)
+      (let ((previous (when indexes
+                        (%decode-document (lmdb:g3t db (doc-id document))))))
+        (update-secondary-indexes database previous document database-name)
+        (lmdb:put db (doc-id document) (%* document))))
+    document))
 
-;; Magic function to also create the document "container" that holds it
+(defun put* (database value &key (id (make-key-id)) (database-name +main-name+))
+  (put database
+       (new-document :id id :value value :changed t)
+       :database-name database-name))
 
-(defun put* (database document &key (id (make-key-id)))
-  (let ((doc (new-document :id id :value document :changed t)))
-    (put database doc)))
+(defun put-bulk (database documents
+                 &key
+                   (database-name +main-name+)
+                   sorted)
+  "Write DOCUMENTS in one LMDB write transaction.
 
+When SORTED is true, caller promises ids are in LMDB key order and Tek9 uses
+MDB_APPEND through the binding. This removes B+tree key-position searches and
+is the preferred path for initial bulk loads."
+  (let* ((db (%main-db database database-name))
+         (indexes (secondary-indexes-for database database-name)))
+    (with-database (database :write t)
+      (dolist (document documents)
+        (touch-document database document)
+        (let ((previous (when indexes
+                          (%decode-document (lmdb:g3t db (doc-id document))))))
+          (update-secondary-indexes database previous document database-name)
+          (lmdb:put db
+                    (doc-id document)
+                    (%* document)
+                    :append sorted))))
+    documents))
 
-(defun put-bulk (database documents &key (database-name +main-name+))
-  (let* ((env (db-env database))
-         (db (lmdb:get-db database-name :env env)))
-    (lmdb:with-txn (:env env :write t)
-      (loop for document in documents
-            do (lmdb:put db (doc-id document) (%* document)))
-      (lmdb:commit-txn env))))
+(defun put-bulk* (database documents
+                  &key
+                    (database-name +main-name+)
+                    sorted)
+  (put-bulk database
+            (loop for (key value) in documents
+                  collect (new-document :id key :value value))
+            :database-name database-name
+            :sorted sorted))
 
-
-(defun put-bulk* (database documents &key (database-name +main-name+))
-  (put-bulk database (loop for  (key val) in documents
-                           collect (new-document :id key :value val))
-            :database-name database-name))
-
-
-;; Document here is just a json string
-
-(defun put-json (db document)
-  (let* ((db-env (db-env db))
-         (db (lmdb:get-db +main-name+ :env db-env))
-         (json-data (jsown:parse document))
-         (id (jsown:val-safe json-data "id")))
-    (put db (new-document :id (if id id (make-key-id)) :value json-data))))
-
-
-
-;; Get a key. I dont get why the wrapper had to use g3t... fetch or find would also fit.
-
+(defun put-json (database json)
+  (let* ((json-data (jsown:parse json))
+         (id (or (jsown:val-safe json-data "_id")
+                 (jsown:val-safe json-data "id")
+                 (make-key-id))))
+    (put database (new-document :id id :value json-data))))
 
 (defun fetch (database id &key (database-name +main-name+))
-  (let* ((env (db-env database))
-         (db (lmdb:get-db database-name :env env :value-encoding :octets)))
-    (lmdb:with-txn (:env env)
-      ($ (lmdb:g3t db id)))))
-
-;; Return The value
+  "Fetch a DOCUMENT by primary key in a read-only snapshot."
+  (let ((db (%main-db database database-name)))
+    (with-database (database)
+      (%decode-document (lmdb:g3t db id)))))
 
 (defun fetch* (database id &key (database-name +main-name+))
-  (doc-value (fetch database id :database-name database-name)))
-
+  (let ((document (fetch database id :database-name database-name)))
+    (and document (doc-value document))))
 
 (defun fetch-bulk (database document-ids &key (database-name +main-name+))
-  (let* ((env (db-env database))
-         (db (lmdb:get-db database-name :env env)))
-    (lmdb:with-txn (:env env :write nil)
-      (loop for id in document-ids
-            collect (cons id ($ (lmdb:g3t db id)))))))
+  "Fetch many ids in one snapshot while reusing one LMDB cursor.
+
+The result order matches DOCUMENT-IDS. Missing ids are returned with NIL values."
+  (let ((db (%main-db database database-name)))
+    (with-database (database)
+      (lmdb:with-cursor (cursor db)
+        (loop for id in document-ids
+              collect
+              (multiple-value-bind (bytes found)
+                  (lmdb:cursor-set-key id cursor)
+                (cons id (and found (%decode-document bytes)))))))))
 
 (defun fetch-bulk* (database document-ids &key (database-name +main-name+))
-  (let ((results (fetch-bulk database document-ids)))
-    (loop for result in results collect
-                                (cons (car result) (doc-value (cdr result))))))
+  (loop for (id . document)
+          in (fetch-bulk database document-ids :database-name database-name)
+        collect (cons id (and document (doc-value document)))))
+
+(defun delete-document (database id &key (database-name +main-name+))
+  "Delete ID and its secondary-index entries atomically."
+  (let* ((db (%main-db database database-name))
+         (indexes (secondary-indexes-for database database-name))
+         (deleted nil))
+    (with-database (database :write t)
+      (let ((previous (%decode-document (lmdb:g3t db id))))
+        (when previous
+          (when indexes
+            (update-secondary-indexes database previous nil database-name))
+          (setf deleted (lmdb:del db id)))))
+    deleted))
