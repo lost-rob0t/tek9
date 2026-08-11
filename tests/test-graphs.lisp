@@ -125,3 +125,38 @@
                                             :incoming t
                                             :predicate "knows"))))
       (close-database db))))
+
+(test graph-namespaces-isolate-external-ids
+  (let ((db (setup-db #P"/tmp/test-tek9-graph-namespaces/")))
+    (unwind-protect
+         (progn
+           (put-nodes db
+                      (list (make-instance 'node :id "same" :props '(:graph "one"))
+                            (make-instance 'node :id "target" :props '(:graph "one")))
+                      :database-name "graph-one")
+           (put-nodes db
+                      (list (make-instance 'node :id "same" :props '(:graph "two"))
+                            (make-instance 'node :id "target" :props '(:graph "two")))
+                      :database-name "graph-two")
+           (put-edge db
+                     (make-instance 'edge
+                                    :id "edge"
+                                    :source "same"
+                                    :predicate "knows"
+                                    :target "target")
+                     :database-name "graph-one")
+           (is (equal "one"
+                      (getf (node-props (fetch-node db "same"
+                                                   :database-name "graph-one"))
+                            :graph)))
+           (is (equal "two"
+                      (getf (node-props (fetch-node db "same"
+                                                   :database-name "graph-two"))
+                            :graph)))
+           (is (= 1 (length (fetch-node-neighbors db "same"
+                                                  :database-name "graph-one"
+                                                  :predicate "knows"))))
+           (is (null (fetch-node-neighbors db "same"
+                                            :database-name "graph-two"
+                                            :predicate "knows"))))
+      (close-database db))))
