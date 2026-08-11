@@ -38,27 +38,63 @@
           ((index-multi-valued-p index) value)
           (t (list value))))))
 
-(defun %index-pair< (left right)
-  "Order (INDEX-KEY . DOCUMENT-ID) pairs for LMDB append loading."
-  (let ((left-key (car left))
-        (right-key (car right)))
-    (if (equal left-key right-key)
-        (string< (cdr left) (cdr right))
-        (%ordered-key< left-key right-key))))
+(defun %new-index-groups ()
+  (make-hash-table :test #'equal))
 
-(defun %index-pairs-for-documents (index documents)
-  "Materialize and sort index pairs for DOCUMENTS.
+(defun %group-index-document (index groups document)
+  "Add DOCUMENT's postings to GROUPS in O(number-of-index-values) expected time."
+  (dolist (value (%index-values index document))
+    (let* ((key (%coerce-index-key index value))
+           (id (doc-id document)))
+      (if (index-unique-p index)
+          (multiple-value-bind (existing present)
+              (gethash key groups)
+            (when (and present (not (string= existing id)))
+              (error "Unique Tek9 index ~S has duplicate key ~S."
+                     (index-name index) key))
+            (setf (gethash key groups) id))
+          ;; Do not globally sort (key . id) pairs. Group postings in O(1),
+          ;; then sort the distinct keys and each usually-small posting list.
+          (push id (gethash key groups))))))
+  groups)
 
-This is intentionally an in-memory sequential-build primitive. Use
-REBUILD-INDEX for the low-memory streaming path when the corpus is too large to
-sort in RAM."
-  (sort
-   (loop for document in documents
-         append
-         (loop for value in (%index-values index document)
-               collect (cons (%coerce-index-key index value)
-                             (doc-id document))))
-   #'%index-pair<))
+(defun %index-groups-for-documents (index documents)
+  (let ((groups (%new-index-groups)))
+    (dolist (document documents groups)
+      (%group-index-document index groups document))))
+
+(defun %sorted-index-keys (groups)
+  (sort (loop for key being the hash-keys of groups collect key)
+        #'%ordered-key<))
+
+(defun %write-index-groups (index groups)
+  "Append grouped postings to an empty index B+tree in key order."
+  (let ((db (index-db index)))
+    (lmdb:with-cursor (cursor db)
+      (dolist (key (%sorted-index-keys groups))
+        (if (index-unique-p index)
+            (lmdb:cursor-put key
+                             (gethash key groups)
+                             cursor
+                             :overwrite nil
+                             :append t)
+            (let ((ids (sort (gethash key groups) #'string<))
+                  (first-p t)
+                  (previous-id nil))
+              (dolist (id ids)
+                ;; A multi-valued extractor can emit the same index value more
+                ;; than once. Skip duplicate (key,id) postings after sorting.
+                (unless (and previous-id (string= previous-id id))
+                  (if first-p
+                      (progn
+                        (lmdb:cursor-put key id cursor
+                                         :dupdata nil
+                                         :append t)
+                        (setf first-p nil))
+                      (lmdb:cursor-put key id cursor
+                                       :dupdata nil
+                                       :append-dup t))
+                  (setf previous-id id)))))))))
 
 (defun secondary-index-by-name (database name)
   (gethash name (db-indexes database)))
@@ -146,40 +182,6 @@ The durable LMDB named database is intentionally retained."
     (dolist (key keys)
       (lmdb:del db key))))
 
-(defun %write-sorted-index-pairs (index pairs)
-  "Append pre-sorted PAIRS to an empty INDEX inside the active write txn.
-
-For a DUPSORT database MDB_APPEND is used only when the indexed key advances.
-Repeated values for the same indexed key use MDB_APPENDDUP instead. Mixing both
-flags on the same duplicate key causes LMDB to reject the second value."
-  (let ((db (index-db index))
-        (previous-key nil)
-        (have-previous-key nil))
-    (lmdb:with-cursor (cursor db)
-      (dolist (pair pairs)
-        (let* ((key (car pair))
-               (value (cdr pair))
-               (same-key-p (and have-previous-key
-                                (equal previous-key key))))
-          (cond
-            ((index-unique-p index)
-             (when same-key-p
-               (error "Unique Tek9 index ~S has duplicate key ~S."
-                      (index-name index) key))
-             (lmdb:cursor-put key value cursor
-                              :overwrite nil
-                              :append t))
-            (same-key-p
-             (lmdb:cursor-put key value cursor
-                              :dupdata nil
-                              :append-dup t))
-            (t
-             (lmdb:cursor-put key value cursor
-                              :dupdata nil
-                              :append t)))
-          (setf previous-key key
-                have-previous-key t))))))
-
 (defun clear-index (database name)
   "Remove every key from INDEX in one write transaction."
   (let ((index (or (secondary-index-by-name database name)
@@ -189,10 +191,7 @@ flags on the same duplicate key causes LMDB to reject the second value."
     index))
 
 (defun rebuild-index (database name)
-  "Rebuild INDEX with bounded memory and ordinary LMDB insertion.
-
-This is the conservative path for very large corpora. REBUILD-INDEX-FAST uses
-more RAM but sorts once and feeds LMDB sequentially with APPEND/APPEND-DUP."
+  "Rebuild INDEX with bounded memory and ordinary LMDB insertion."
   (let* ((index (or (secondary-index-by-name database name)
                     (error "Unknown Tek9 index ~S." name)))
          (source (%main-db database (index-source-db index))))
@@ -204,27 +203,22 @@ more RAM but sorts once and feeds LMDB sequentially with APPEND/APPEND-DUP."
     index))
 
 (defun rebuild-index-fast (database name)
-  "Rebuild INDEX by sorting extracted pairs and append-loading the B+tree.
+  "Rebuild INDEX with grouped postings and sequential LMDB append writes.
 
-This minimizes B+tree comparisons and random page work. It intentionally holds
-all index pairs in memory, so use REBUILD-INDEX for corpora where that memory
-tradeoff is unacceptable. Source mutation is excluded for the duration by the
-single LMDB write transaction; readers remain non-blocking."
+Unlike the previous global pair sort, this builds one posting list per distinct
+index key. The algorithm sorts only the distinct keys and each local posting
+list, reducing comparison work substantially for low/medium-cardinality
+indexes while retaining one atomic write transaction."
   (let* ((index (or (secondary-index-by-name database name)
                     (error "Unknown Tek9 index ~S." name)))
          (source (%main-db database (index-source-db index))))
     (with-database (database :write t)
-      (let ((pairs nil))
+      (let ((groups (%new-index-groups)))
         (lmdb:do-db (key bytes source)
           (progn key)
-          (let ((document (%decode-document bytes)))
-            (dolist (value (%index-values index document))
-              (push (cons (%coerce-index-key index value)
-                          (doc-id document))
-                    pairs))))
-        (setf pairs (sort pairs #'%index-pair<))
+          (%group-index-document index groups (%decode-document bytes)))
         (%clear-index-in-transaction index)
-        (%write-sorted-index-pairs index pairs)))
+        (%write-index-groups index groups)))
     index))
 
 (defun %db-empty-p (db)
@@ -242,9 +236,8 @@ single LMDB write transaction; readers remain non-blocking."
   "Atomically initial-load DOCUMENTS and every registered secondary index.
 
 BULK-LOAD requires an empty source database. Documents are sorted by primary
-key once, index pairs are extracted and sorted in memory before the write
-transaction, then source and index B+trees are populated sequentially with LMDB
-APPEND/APPEND-DUP.
+key once. Each index groups postings by key in memory and append-loads the
+resulting B+tree in sorted key/value order.
 
 This is an optional RAM-for-sequential-I/O strategy, not universally faster
 than PUT-BULK with incremental index maintenance. Benchmark the target corpus.
@@ -256,7 +249,7 @@ back."
          (index-builds
            (loop for index in indexes
                  collect (cons index
-                               (%index-pairs-for-documents index documents)))))
+                               (%index-groups-for-documents index documents)))))
     (with-database (database :write t)
       (unless (%db-empty-p source)
         (error "Tek9 BULK-LOAD requires empty source database ~S."
@@ -268,7 +261,7 @@ back."
           (touch-document database document))
         (lmdb:put source (doc-id document) (%* document) :append t))
       (dolist (build index-builds)
-        (%write-sorted-index-pairs (car build) (cdr build))))
+        (%write-index-groups (car build) (cdr build))))
     documents))
 
 (defun index-document-ids (database name key)
