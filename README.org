@@ -1,25 +1,208 @@
-#+title: Readme
-[[./logo.jpeg]]
-* TeK9DB
-Tek9 Is a local embedded database implemented in common lisp.
+#+title: Tek9
 
-Under the hood it uses LMDB for extremely fast readback times.
+* Tek9DB
 
-** Usage
-git clone to =~/quicklisp/local-projects/=
+Tek9 is a local embedded document and graph database implemented in Common Lisp on top of LMDB.
+
+Version 0.2 keeps the small Lisp-facing API, but moves the storage engine toward LMDB-native data structures instead of rebuilding database machinery in Lisp:
+
+- one LMDB environment per Tek9 database;
+- cached named database handles;
+- one transaction for bulk mutation;
+- ordered primary-key range scans;
+- durable secondary indexes using LMDB named databases;
+- DUPSORT indexes for one-to-many values;
+- separate graph node, edge, outbound-adjacency, and inbound-adjacency keyspaces;
+- full durability by default with explicit weaker profiles for rebuildable data;
+- environment and database statistics for profiling.
+
+Tek9 is still alpha software. Treat the on-disk format and public API as evolving until a stable release is cut.
+
+** Install
+
+Clone into Quicklisp local projects:
 
 #+begin_src shell
 git clone https://github.com/lost-rob0t/tek9.git ~/quicklisp/local-projects/tek9
 #+end_src
 
-Create a database
+Then:
+
 #+begin_src lisp
 (ql:quickload :tek9)
-(in-package :tek9)
-(setq *db* (new-database "test" :path (uiop:parse-native-namestring "/tmp/tek9/")))
-(put *db* (new-document :value '(this is a value!)))
+(use-package :tek9)
 #+end_src
 
-** WARNING
-*YOU SHOULD NOT USE THIS WITHOUT GREAT UNDERSTANDING OR AWARENESS OF IMPLICATION'S OF USING A ALPHA QUALITY DATABASE IN PRODUCTION*
-That being said please let me know any issues incase you choose to use this.
+** Open a database
+
+The default LMDB map reserves 1 GiB of virtual address space and supports 64 named databases. The map is a capacity ceiling, not a preallocated 1 GiB data file.
+
+#+begin_src lisp
+(defparameter *db*
+  (open-database
+   (new-database "quasar"
+                 :path #P"/tmp/quasar-tek9/"
+                 :max-size (* 8 1024 1024 1024))))
+#+end_src
+
+Keep the environment open for the lifetime of the application instead of reopening it for every operation.
+
+** Durability profiles
+
+=:full= is the default and should be used for canonical user data.
+
+#+begin_src lisp
+(new-database "canonical" :path #P"/tmp/canonical/" :durability :full)
+#+end_src
+
+=:metadata-lazy= can lose the newest committed transaction after a machine crash but keeps LMDB's transactional structure. =:nosync= skips normal commit flushing and is intended only for disposable or reproducible stores where the caller explicitly accepts the crash-loss tradeoff.
+
+Do not turn sync off just to make a benchmark look good.
+
+** Documents
+
+#+begin_src lisp
+(put *db* (new-document :id "person:1"
+                        :value '(:dtype "person" :name "Ada")))
+
+(fetch* *db* "person:1")
+#+end_src
+
+*** Bulk ingest
+
+Bulk writes share one LMDB write transaction instead of opening and committing one transaction per document.
+
+#+begin_src lisp
+(put-bulk *db*
+          (loop for i below 100000
+                collect (new-document
+                         :id (format nil "~12,'0d" i)
+                         :value (list :n i))))
+#+end_src
+
+If the ids are already in LMDB key order, pass =:sorted t=. Tek9 maps that to LMDB's append fast path, which avoids a key-location search for every inserted row.
+
+#+begin_src lisp
+(put-bulk *db* sorted-documents :sorted t)
+#+end_src
+
+Only set =:sorted t= when the input really is sorted. LMDB rejects out-of-order append input.
+
+*** Bulk reads
+
+#+begin_src lisp
+(fetch-bulk *db* '("000000000001" "000000000002" "000000000003"))
+#+end_src
+
+The ids are resolved inside one read snapshot with one reusable cursor.
+
+** Secondary indexes
+
+A secondary index is another LMDB named database, not a Lisp hash-table cache. Non-unique indexes use DUPSORT so one indexed value maps directly to multiple sorted document ids.
+
+#+begin_src lisp
+(register-index
+ *db*
+ "dtype"
+ (lambda (document)
+   (getf (doc-value document) :dtype)))
+
+(rebuild-index *db* "dtype")
+
+(index-document-ids *db* "dtype" "person")
+(select-index *db* "dtype" "person")
+#+end_src
+
+Indexes are maintained in the same write transaction as document replacement and deletion.
+
+Integer indexes can use LMDB's native unsigned-64 ordering:
+
+#+begin_src lisp
+(register-index
+ *db*
+ "created"
+ (lambda (document)
+   (getf (doc-value document) :created))
+ :key-type :uint64)
+#+end_src
+
+** Ordered range scans
+
+Primary keys are already ordered by LMDB. Tek9 can seek once and walk sequentially:
+
+#+begin_src lisp
+(select-primary-range *db* "person:1000" :end "person:1999")
+#+end_src
+
+Secondary indexes support the same pattern:
+
+#+begin_src lisp
+(select-index-range *db* "created" 1700000000 :end 1800000000)
+#+end_src
+
+Use an index or ordered range when the predicate is indexable. =select= remains the full-scan fallback for arbitrary Lisp predicates.
+
+** Graph storage
+
+Tek9 graphs no longer depend on rewriting an entire node every time an edge changes. Each graph uses four LMDB keyspaces:
+
+#+begin_example
+graph-name           node-id -> encoded node
+graph-name/edges     edge-id -> encoded edge
+graph-name/out       source-node-id -> DUPSORT edge ids
+graph-name/in        target-node-id -> DUPSORT edge ids
+#+end_example
+
+This makes adjacency lookup proportional to an indexed seek plus the degree of the selected node.
+
+#+begin_src lisp
+(defparameter *a* (make-instance 'node :id "a" :props '(:name "A")))
+(defparameter *b* (make-instance 'node :id "b" :props '(:name "B")))
+
+(put-nodes *db* (list *a* *b*) :database-name "investigation")
+
+(put-edge *db*
+          (make-instance 'edge
+                         :source "a"
+                         :predicate "knows"
+                         :target "b")
+          :database-name "investigation")
+
+(fetch-node-neighbors *db* "a" :database-name "investigation")
+#+end_src
+
+A batch of edges updates the edge record plus outbound and inbound adjacency databases in one LMDB transaction.
+
+** Views
+
+Views remain available for derived materialized results. Version 0.2 fixes their transaction boundaries and rebuild path; secondary indexes should be preferred for ordinary equality and range lookup because they avoid running arbitrary map functions across the full corpus.
+
+** Performance rules
+
+1. Keep one LMDB environment open per application database.
+2. Batch writes into one transaction whenever the operation is logically atomic.
+3. Feed sorted initial loads through =:sorted t=.
+4. Put selective query predicates behind secondary indexes instead of repeatedly decoding every document.
+5. Use range cursors for ordered predicates.
+6. Store graph adjacency in DUPSORT keyspaces instead of embedding growing edge lists in node values.
+7. Choose a generous LMDB map size up front; it reserves address space rather than eagerly allocating the whole file.
+8. Benchmark with the durability profile that production will actually use.
+9. Measure environment/database statistics before inventing caches above the memory-mapped store.
+
+Tek9 intentionally does not add its own buffer pool, write-ahead log, or page cache above LMDB. LMDB already owns those storage-engine responsibilities; Tek9 should concentrate on key layout, indexing, batching, query planning, graph semantics, and the Common Lisp API.
+
+** Benchmark harness
+
+Load =bench/bench.lisp= after Tek9 and run:
+
+#+begin_src lisp
+(tek9-bench:run :count 100000)
+#+end_src
+
+The harness measures sorted bulk ingest, point reads, secondary-index rebuild, indexed equality lookup, an ordered primary-key range scan, and prints LMDB statistics. Treat benchmark numbers as machine- and durability-profile-specific; compare changes on the same host and dataset.
+
+** Close
+
+#+begin_src lisp
+(close-database *db*)
+#+end_src
