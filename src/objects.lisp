@@ -180,19 +180,10 @@ into a safe optimization hint instead of blindly asserting MDB_APPEND."
 (defgeneric secondary-indexes-for (database database-name)
   (:documentation "Return registered secondary indexes for DATABASE-NAME."))
 
-(defmethod secondary-indexes-for ((database database) database-name)
-  (declare (ignore database database-name))
-  nil)
-
 (defgeneric update-secondary-indexes
     (database previous-document document database-name)
   (:documentation
    "Update secondary indexes for a document mutation inside the active write transaction."))
-
-(defmethod update-secondary-indexes
-    ((database database) previous-document document database-name)
-  (declare (ignore database previous-document document database-name))
-  nil)
 
 (defun %* (entry)
   "Encode ENTRY to Conspack octets."
