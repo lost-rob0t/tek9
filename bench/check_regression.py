@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail CI when a Tek9 benchmark score regresses from the committed baseline."""
+"""Fail CI when a Tek9 benchmark regresses from the committed baseline."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def main() -> int:
         "--max-regression-pct",
         type=float,
         default=5.0,
-        help="Allowed speedup-score drop for CI noise before failing.",
+        help="Allowed degradation before a metric is considered regressed.",
     )
     args = parser.parse_args()
 
@@ -47,20 +47,38 @@ def main() -> int:
     )
 
     for name in sorted(baseline_metrics):
-        old = float(baseline_metrics[name]["speedup"])
-        new = float(current_metrics[name]["speedup"])
-        if not (math.isfinite(old) and math.isfinite(new) and old > 0 and new > 0):
-            failures.append(f"{name}: non-finite/non-positive score old={old} new={new}")
+        old_metric = baseline_metrics[name]
+        new_metric = current_metrics[name]
+        old_speedup = float(old_metric["speedup"])
+        new_speedup = float(new_metric["speedup"])
+        old_fast = float(old_metric["fast_seconds"])
+        new_fast = float(new_metric["fast_seconds"])
+
+        values = (old_speedup, new_speedup, old_fast, new_fast)
+        if not all(math.isfinite(value) and value > 0 for value in values):
+            failures.append(f"{name}: non-finite/non-positive benchmark value")
             continue
 
-        change = (new / old - 1.0) * 100.0
-        status = "PASS"
-        if new < old * (1.0 - tolerance):
-            status = "REGRESSION"
+        speedup_change = (new_speedup / old_speedup - 1.0) * 100.0
+        fast_change = (new_fast / old_fast - 1.0) * 100.0
+
+        slower = new_fast > old_fast * (1.0 + tolerance)
+        weaker = new_speedup < old_speedup * (1.0 - tolerance)
+        regressed = slower and weaker
+        status = "REGRESSION" if regressed else "PASS"
+
+        print(
+            f"{status:10s} {name:40s} "
+            f"fast {old_fast:.9f}s -> {new_fast:.9f}s {fast_change:+8.2f}% | "
+            f"score {old_speedup:.4f}x -> {new_speedup:.4f}x {speedup_change:+8.2f}%"
+        )
+
+        if regressed:
             failures.append(
-                f"{name}: {old:.4f}x -> {new:.4f}x ({change:.2f}%)"
+                f"{name}: fast path {old_fast:.9f}s -> {new_fast:.9f}s "
+                f"({fast_change:+.2f}%), speedup {old_speedup:.4f}x -> "
+                f"{new_speedup:.4f}x ({speedup_change:+.2f}%)"
             )
-        print(f"{status:10s} {name:42s} {old:10.4f}x -> {new:10.4f}x {change:+8.2f}%")
 
     if failures:
         print("\nPerformance regression detected:")
@@ -68,7 +86,7 @@ def main() -> int:
             print(f"  - {failure}")
         return 1
 
-    print("\nNo benchmark regression exceeded the configured threshold.")
+    print("\nNo benchmark had both a slower fast path and a weaker relative score.")
     return 0
 
 
