@@ -128,17 +128,16 @@ workflows so large imports do not allocate a second list/vector of every id."
     (and document (doc-value document))))
 
 (defun fetch-bulk (database document-ids &key (database-name +main-name+))
-  "Fetch many ids in one snapshot while reusing one LMDB cursor.
+  "Fetch many ids in one read snapshot using direct LMDB point lookups.
 
-The result order matches DOCUMENT-IDS. Missing ids are returned with NIL values."
+MDB_GET is the exact-key primitive; creating a cursor and repeatedly doing
+MDB_SET was slower for arbitrary point keys in the benchmark. The result order
+matches DOCUMENT-IDS. Missing ids are returned with NIL values."
   (let ((db (%main-db database database-name)))
     (with-database (database)
-      (lmdb:with-cursor (cursor db)
-        (loop for id in document-ids
-              collect
-              (multiple-value-bind (bytes found)
-                  (lmdb:cursor-set-key id cursor)
-                (cons id (and found (%decode-document bytes)))))))))
+      (loop for id in document-ids
+            for bytes = (lmdb:g3t db id)
+            collect (cons id (%decode-document bytes))))))
 
 (defun fetch-bulk* (database document-ids &key (database-name +main-name+))
   (loop for (id . document)
