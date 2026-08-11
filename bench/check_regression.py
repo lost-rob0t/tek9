@@ -11,6 +11,10 @@ import sys
 from pathlib import Path
 
 
+BOUNDARY_REL_TOL = 1e-5
+BOUNDARY_ABS_TOL = 1e-12
+
+
 def load(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -26,6 +30,22 @@ def fast_mad(metric: dict) -> float:
         return 0.0
     center = statistics.median(samples)
     return statistics.median(abs(value - center) for value in samples)
+
+
+def clearly_exceeds(value: float, threshold: float) -> bool:
+    """Return true only when VALUE is materially above THRESHOLD.
+
+    Benchmark JSON is rounded after Common Lisp timing arithmetic. Values that
+    are mathematically on the same threshold can therefore differ by a few
+    nanoseconds after serialization. Treat that floating-point boundary fuzz as
+    equality instead of converting it into a CI failure.
+    """
+    return value > threshold and not math.isclose(
+        value,
+        threshold,
+        rel_tol=BOUNDARY_REL_TOL,
+        abs_tol=BOUNDARY_ABS_TOL,
+    )
 
 
 def main() -> int:
@@ -102,8 +122,8 @@ def main() -> int:
             else float("nan")
         )
 
-        relative_regression = slowdown > relative_limit
-        noise_significant = slowdown > noise_limit
+        relative_regression = clearly_exceeds(slowdown, relative_limit)
+        noise_significant = clearly_exceeds(slowdown, noise_limit)
         regressed = relative_regression and noise_significant
         status = "REGRESSION" if regressed else ("NOISY PASS" if relative_regression else "PASS")
 

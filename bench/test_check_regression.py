@@ -55,6 +55,14 @@ class RegressionGateTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertIn("NOISY PASS", output)
 
+    def test_serialization_fuzz_at_noise_boundary_passes(self) -> None:
+        result, output = self.run_gate(
+            {"write-batch": metric(0.028500000, 0.000499999)},
+            {"write-batch": metric(0.029999999, 0.0)},
+        )
+        self.assertEqual(0, result)
+        self.assertIn("NOISY PASS", output)
+
     def test_large_shift_outside_noise_fails(self) -> None:
         result, output = self.run_gate(
             {"point-read": metric(0.100, 0.001)},
