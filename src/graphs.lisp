@@ -1,11 +1,19 @@
 (in-package :tek9)
 
-(defparameter +graph-node-db+ "graph/nodes")
-(defparameter +graph-edge-db+ "graph/edges")
-(defparameter +graph-out-db+ "graph/out")
-(defparameter +graph-in-db+ "graph/in")
-(defparameter +graph-out-predicate-db+ "graph/out-predicate")
-(defparameter +graph-in-predicate-db+ "graph/in-predicate")
+(defparameter +graph-meta-db+ "graph/v2/meta")
+(defparameter +graph-node-map-db+ "graph/v2/node-map")
+(defparameter +graph-edge-map-db+ "graph/v2/edge-map")
+(defparameter +graph-predicate-map-db+ "graph/v2/predicate-map")
+(defparameter +graph-node-db+ "graph/v2/nodes")
+(defparameter +graph-edge-db+ "graph/v2/edges")
+(defparameter +graph-out-db+ "graph/v2/out")
+(defparameter +graph-in-db+ "graph/v2/in")
+(defparameter +graph-out-predicate-db+ "graph/v2/out-predicate")
+(defparameter +graph-in-predicate-db+ "graph/v2/in-predicate")
+
+(defparameter +next-node-id-key+ "next-node-id")
+(defparameter +next-edge-id-key+ "next-edge-id")
+(defparameter +next-predicate-id-key+ "next-predicate-id")
 
 (defclass node ()
   ((id :initarg :id :initform (make-key-id) :accessor node-id)
@@ -25,6 +33,18 @@
 (conspack:defencoding edge
   id source predicate target)
 
+(defstruct graph-dbis
+  meta
+  node-map
+  edge-map
+  predicate-map
+  nodes
+  edges
+  out
+  in
+  out-predicate
+  in-predicate)
+
 (defun get-default-graph-db ()
   "Return the logical default graph name."
   "default")
@@ -34,132 +54,206 @@
     (format nil "~d:~a" (length string) string)))
 
 (defun %composite-key (&rest values)
-  "Encode VALUES into an unambiguous lexicographically stable string key."
+  "Encode external identifiers into an unambiguous string lookup key."
   (with-output-to-string (stream)
     (dolist (value values)
       (write-string (%key-part value) stream))))
 
-(defun %decode-key-part (encoded start)
-  "Decode one length-prefixed Tek9 key part beginning at START."
-  (let ((colon (position #\: encoded :start start)))
-    (unless colon
-      (error "Malformed Tek9 composite key ~S." encoded))
-    (let* ((length (parse-integer encoded :start start :end colon))
-           (value-start (1+ colon))
-           (value-end (+ value-start length)))
-      (when (> value-end (length encoded))
-        (error "Malformed Tek9 composite key ~S." encoded))
-      (values (subseq encoded value-start value-end) value-end))))
-
-(defun %adjacency-value (neighbor-id edge-id)
-  "Encode the neighbor and edge identity into one DUPSORT value."
-  (%composite-key neighbor-id edge-id))
-
-(defun %decode-adjacency-value (encoded)
-  "Return NEIGHBOR-ID and EDGE-ID from an adjacency DUPSORT value."
-  (multiple-value-bind (neighbor-id next)
-      (%decode-key-part encoded 0)
-    (multiple-value-bind (edge-id end)
-        (%decode-key-part encoded next)
-      (unless (= end (length encoded))
-        (error "Malformed Tek9 adjacency value ~S." encoded))
-      (values neighbor-id edge-id))))
-
-(defun %graph-node-key (graph-name node-id)
+(defun %external-node-key (graph-name node-id)
   (%composite-key graph-name node-id))
 
-(defun %graph-edge-key (graph-name edge-id)
+(defun %external-edge-key (graph-name edge-id)
   (%composite-key graph-name edge-id))
 
-(defun %graph-adjacency-key (graph-name node-id)
-  (%composite-key graph-name node-id))
+(defun %uint64-octets (value vector offset)
+  "Write VALUE as big-endian uint64 into VECTOR at OFFSET."
+  (check-type value (integer 0 #.(1- (expt 2 64))))
+  (dotimes (index 8 vector)
+    (setf (aref vector (+ offset index))
+          (ldb (byte 8 (* 8 (- 7 index))) value))))
 
-(defun %graph-predicate-key (graph-name node-id predicate)
-  (%composite-key graph-name node-id predicate))
+(defun %octets-uint64 (vector offset)
+  "Read a big-endian uint64 from VECTOR at OFFSET."
+  (let ((value 0))
+    (dotimes (index 8 value)
+      (setf value
+            (logior (ash value 8)
+                    (aref vector (+ offset index)))))))
+
+(defun %uint64-pair (left right)
+  "Return a fixed 16-byte big-endian pair."
+  (let ((vector (make-array 16 :element-type '(unsigned-byte 8))))
+    (%uint64-octets left vector 0)
+    (%uint64-octets right vector 8)
+    vector))
+
+(defun %decode-uint64-pair (vector)
+  (values (%octets-uint64 vector 0)
+          (%octets-uint64 vector 8)))
+
+(defun %predicate-adjacency-key (node-row predicate-row)
+  (%uint64-pair node-row predicate-row))
+
+(defun %adjacency-value (neighbor-row edge-row)
+  (%uint64-pair neighbor-row edge-row))
+
+(defun %graph-meta-db (database)
+  (database-db database +graph-meta-db+
+               :key-encoding :utf-8
+               :value-encoding :uint64))
+
+(defun %graph-node-map-db (database)
+  (database-db database +graph-node-map-db+
+               :key-encoding :utf-8
+               :value-encoding :uint64))
+
+(defun %graph-edge-map-db (database)
+  (database-db database +graph-edge-map-db+
+               :key-encoding :utf-8
+               :value-encoding :uint64))
+
+(defun %graph-predicate-map-db (database)
+  (database-db database +graph-predicate-map-db+
+               :key-encoding :utf-8
+               :value-encoding :uint64))
 
 (defun get-graph-db (database &key (database-name (get-default-graph-db)))
-  "Return the shared graph-node DBI.
+  "Return the shared internal node DBI.
 
-DATABASE-NAME is accepted for API compatibility; graph identity lives in the
-composite key so Tek9 needs a constant number of LMDB named databases."
+DATABASE-NAME is accepted for API compatibility. Logical graph isolation is in
+the external-id mapping; internal node row IDs are globally unique within the
+Tek9 environment."
   (declare (ignore database-name))
   (database-db database +graph-node-db+
-               :key-encoding :utf-8
-               :value-encoding :octets))
+               :key-encoding :uint64
+               :value-encoding :octets
+               :integer-key t))
 
 (defun %graph-edge-db (database)
   (database-db database +graph-edge-db+
-               :key-encoding :utf-8
-               :value-encoding :octets))
+               :key-encoding :uint64
+               :value-encoding :octets
+               :integer-key t))
 
-(defun %graph-dupsort-db (database name)
+(defun %graph-adjacency-db (database name)
   (database-db database name
-               :key-encoding :utf-8
-               :value-encoding :utf-8
-               :dupsort t))
+               :key-encoding :uint64
+               :value-encoding :octets
+               :integer-key t
+               :dupsort t
+               :dupfixed t))
+
+(defun %graph-predicate-adjacency-db (database name)
+  (database-db database name
+               :key-encoding :octets
+               :value-encoding :octets
+               :dupsort t
+               :dupfixed t))
 
 (defun ensure-graph-dbs (database)
-  "Open and cache shared graph DBIs.
+  "Open and cache every physical graph DBI before entering a transaction."
+  (make-graph-dbis
+   :meta (%graph-meta-db database)
+   :node-map (%graph-node-map-db database)
+   :edge-map (%graph-edge-map-db database)
+   :predicate-map (%graph-predicate-map-db database)
+   :nodes (get-graph-db database)
+   :edges (%graph-edge-db database)
+   :out (%graph-adjacency-db database +graph-out-db+)
+   :in (%graph-adjacency-db database +graph-in-db+)
+   :out-predicate (%graph-predicate-adjacency-db
+                   database +graph-out-predicate-db+)
+   :in-predicate (%graph-predicate-adjacency-db
+                  database +graph-in-predicate-db+)))
 
-Adjacency stores (neighbor-id, edge-id) as the DUPSORT value. This lets graph
-neighbor traversal jump directly from the adjacency index to the neighboring
-node while edge-object traversal still resolves the edge id. Predicate-specific
-keyspaces avoid scanning unrelated relationship types."
-  (values (get-graph-db database)
-          (%graph-edge-db database)
-          (%graph-dupsort-db database +graph-out-db+)
-          (%graph-dupsort-db database +graph-in-db+)
-          (%graph-dupsort-db database +graph-out-predicate-db+)
-          (%graph-dupsort-db database +graph-in-predicate-db+)))
+(defun %next-row-id (meta key)
+  "Allocate one monotonically increasing uint64 row id in the active write txn."
+  (let* ((current (or (lmdb:g3t meta key) 0))
+         (next (1+ current)))
+    (lmdb:put meta key next)
+    next))
+
+(defun %lookup-node-row (dbis graph-name external-id)
+  (lmdb:g3t (graph-dbis-node-map dbis)
+            (%external-node-key graph-name external-id)))
+
+(defun %ensure-node-row (dbis graph-name external-id)
+  (or (%lookup-node-row dbis graph-name external-id)
+      (let ((row (%next-row-id (graph-dbis-meta dbis) +next-node-id-key+)))
+        (lmdb:put (graph-dbis-node-map dbis)
+                  (%external-node-key graph-name external-id)
+                  row)
+        row)))
+
+(defun %lookup-edge-row (dbis graph-name external-id)
+  (lmdb:g3t (graph-dbis-edge-map dbis)
+            (%external-edge-key graph-name external-id)))
+
+(defun %ensure-edge-row (dbis graph-name external-id)
+  (or (%lookup-edge-row dbis graph-name external-id)
+      (let ((row (%next-row-id (graph-dbis-meta dbis) +next-edge-id-key+)))
+        (lmdb:put (graph-dbis-edge-map dbis)
+                  (%external-edge-key graph-name external-id)
+                  row)
+        row)))
+
+(defun %lookup-predicate-row (dbis predicate)
+  (lmdb:g3t (graph-dbis-predicate-map dbis) (princ-to-string predicate)))
+
+(defun %ensure-predicate-row (dbis predicate)
+  (let ((key (princ-to-string predicate)))
+    (or (lmdb:g3t (graph-dbis-predicate-map dbis) key)
+        (let ((row (%next-row-id
+                    (graph-dbis-meta dbis)
+                    +next-predicate-id-key+)))
+          (lmdb:put (graph-dbis-predicate-map dbis) key row)
+          row))))
 
 (defun edge-key (edge)
-  "Return EDGE's stable logical identity."
+  "Return EDGE's stable external identity."
   (edge-id edge))
 
 (defun %decode-document-or-object (bytes)
   (and bytes ($ bytes)))
 
 (defun put-node (database node &key (database-name (get-default-graph-db)))
-  (let ((db (get-graph-db database)))
+  (let ((dbis (ensure-graph-dbs database)))
     (with-database (database :write t)
-      (lmdb:put db
-                (%graph-node-key database-name (node-id node))
-                (%* node)))
+      (let ((row (%ensure-node-row dbis database-name (node-id node))))
+        (lmdb:put (graph-dbis-nodes dbis) row (%* node))))
     node))
 
 (defun put-nodes (database nodes &key (database-name (get-default-graph-db)) sorted)
-  "Persist NODES in one transaction.
+  "Persist NODES in one transaction using compact internal uint64 row IDs.
 
-SORTED is a safe performance hint. Tek9 enables LMDB's append path only when
-the first graph-qualified key is beyond the entire shared node DB."
-  (let ((db (get-graph-db database)))
+SORTED is retained for API compatibility; internal row IDs are allocated
+monotonically, so new rows naturally follow LMDB's integer-key order."
+  (declare (ignore sorted))
+  (let ((dbis (ensure-graph-dbs database)))
     (with-database (database :write t)
-      (let ((append-p
-              (and sorted
-                   nodes
-                   (%append-safe-p
-                    db
-                    (%graph-node-key database-name (node-id (first nodes)))))))
-        (dolist (node nodes)
-          (lmdb:put db
-                    (%graph-node-key database-name (node-id node))
-                    (%* node)
-                    :append append-p))))
+      (dolist (node nodes)
+        (let ((row (%ensure-node-row dbis database-name (node-id node))))
+          (lmdb:put (graph-dbis-nodes dbis) row (%* node)))))
     nodes))
 
 (defun fetch-node (database id &key (database-name (get-default-graph-db)))
-  (let ((db (get-graph-db database)))
+  (let ((dbis (ensure-graph-dbs database)))
     (with-database (database)
-      (%decode-document-or-object
-       (lmdb:g3t db (%graph-node-key database-name id))))))
+      (let ((row (%lookup-node-row dbis database-name id)))
+        (and row
+             (%decode-document-or-object
+              (lmdb:g3t (graph-dbis-nodes dbis) row)))))))
 
 (defun fetch-bulk-nodes (database ids &key (database-name (get-default-graph-db)))
-  "Resolve arbitrary node ids in one snapshot with direct MDB_GET operations."
-  (let ((db (get-graph-db database)))
+  "Resolve arbitrary external node IDs inside one LMDB snapshot."
+  (let ((dbis (ensure-graph-dbs database)))
     (with-database (database)
       (loop for id in ids
-            for bytes = (lmdb:g3t db (%graph-node-key database-name id))
-            collect (%decode-document-or-object bytes)))))
+            for row = (%lookup-node-row dbis database-name id)
+            collect
+            (and row
+                 (%decode-document-or-object
+                  (lmdb:g3t (graph-dbis-nodes dbis) row)))))))
 
 (defun add-node-edge (node edge)
   "Compatibility helper. Durable adjacency is stored in LMDB DUPSORT databases."
@@ -170,43 +264,77 @@ the first graph-qualified key is beyond the entire shared node DB."
   (put-edges database (list edge) :database-name database-name)
   edge)
 
-(defun %put-adjacency (db key neighbor-id edge-id)
+(defun %put-adjacency (db key neighbor-row edge-row)
   (lmdb:put db
             key
-            (%adjacency-value neighbor-id edge-id)
+            (%adjacency-value neighbor-row edge-row)
             :dupdata nil
             :key-exists-error-p nil))
 
-(defun put-edges (database edges &key (database-name (get-default-graph-db)))
-  "Persist EDGES and adjacency indexes atomically.
+(defun %delete-adjacency (db key neighbor-row edge-row)
+  (lmdb:del db key :value (%adjacency-value neighbor-row edge-row)))
 
-Each edge has its own compact ID, so parallel edges are preserved. General and
-predicate-specific inbound/outbound indexes are updated in the same LMDB
-transaction as the edge record. Adjacency values carry the neighbor id too, so
-neighbor traversal does not need an intermediate edge-record lookup."
-  (multiple-value-bind (nodes edge-db out-db in-db out-predicate-db in-predicate-db)
-      (ensure-graph-dbs database)
-    (declare (ignore nodes))
+(defun %remove-edge-adjacency (dbis graph-name edge-row edge)
+  "Remove EDGE's current adjacency entries in the active write transaction."
+  (let* ((source-row (%lookup-node-row dbis graph-name (edge-source edge)))
+         (target-row (%lookup-node-row dbis graph-name (edge-target edge)))
+         (predicate-row (%lookup-predicate-row dbis (edge-predicate edge))))
+    (when (and source-row target-row)
+      (%delete-adjacency (graph-dbis-out dbis)
+                         source-row target-row edge-row)
+      (%delete-adjacency (graph-dbis-in dbis)
+                         target-row source-row edge-row)
+      (when predicate-row
+        (%delete-adjacency (graph-dbis-out-predicate dbis)
+                           (%predicate-adjacency-key source-row predicate-row)
+                           target-row edge-row)
+        (%delete-adjacency (graph-dbis-in-predicate dbis)
+                           (%predicate-adjacency-key target-row predicate-row)
+                           source-row edge-row)))))
+
+(defun %insert-edge (dbis graph-name edge)
+  "Insert or replace one EDGE in the active write transaction."
+  (let* ((source-row (%lookup-node-row dbis graph-name (edge-source edge)))
+         (target-row (%lookup-node-row dbis graph-name (edge-target edge))))
+    (unless source-row
+      (error "Unknown source node ~S in graph ~S."
+             (edge-source edge) graph-name))
+    (unless target-row
+      (error "Unknown target node ~S in graph ~S."
+             (edge-target edge) graph-name))
+    (let* ((existing-row (%lookup-edge-row dbis graph-name (edge-id edge)))
+           (edge-row (or existing-row
+                         (%ensure-edge-row dbis graph-name (edge-id edge))))
+           (predicate-row (%ensure-predicate-row dbis (edge-predicate edge))))
+      (when existing-row
+        (let ((previous-bytes (lmdb:g3t (graph-dbis-edges dbis) edge-row)))
+          (when previous-bytes
+            (%remove-edge-adjacency
+             dbis graph-name edge-row
+             (%decode-document-or-object previous-bytes)))))
+      (lmdb:put (graph-dbis-edges dbis) edge-row (%* edge))
+      (%put-adjacency (graph-dbis-out dbis)
+                      source-row target-row edge-row)
+      (%put-adjacency (graph-dbis-in dbis)
+                      target-row source-row edge-row)
+      (%put-adjacency (graph-dbis-out-predicate dbis)
+                      (%predicate-adjacency-key source-row predicate-row)
+                      target-row edge-row)
+      (%put-adjacency (graph-dbis-in-predicate dbis)
+                      (%predicate-adjacency-key target-row predicate-row)
+                      source-row edge-row)
+      edge-row)))
+
+(defun put-edges (database edges &key (database-name (get-default-graph-db)))
+  "Persist EDGES and every adjacency index atomically.
+
+External strings are resolved once at the boundary. The hot graph keyspaces use
+uint64 node/edge/predicate IDs and fixed 16-byte adjacency records."
+  (let ((dbis (ensure-graph-dbs database)))
     (with-database (database :write t)
       (dolist (edge edges)
-        (let ((id (edge-id edge))
-              (source (edge-source edge))
-              (target (edge-target edge))
-              (predicate (edge-predicate edge)))
-          (lmdb:put edge-db (%graph-edge-key database-name id) (%* edge))
-          (%put-adjacency out-db
-                          (%graph-adjacency-key database-name source)
-                          target id)
-          (%put-adjacency in-db
-                          (%graph-adjacency-key database-name target)
-                          source id)
-          (%put-adjacency out-predicate-db
-                          (%graph-predicate-key database-name source predicate)
-                          target id)
-          (%put-adjacency in-predicate-db
-                          (%graph-predicate-key database-name target predicate)
-                          source id)))))
-  edges)
+        (%insert-edge dbis database-name edge)))
+    edges))
 
 (defun put-edges* (database edge-list &key (database-name (get-default-graph-db)))
   (put-edges database
@@ -217,110 +345,110 @@ neighbor traversal does not need an intermediate edge-record lookup."
                                           :predicate predicate))
              :database-name database-name))
 
-(defun %adjacency-db-and-key (database database-name node-id incoming predicate)
-  "Return only the adjacency DBI required for this lookup and its key."
+(defun %adjacency-db-and-key (dbis node-row predicate incoming)
+  "Return the physical adjacency DBI and key for NODE-ROW."
   (if predicate
-      (values (%graph-dupsort-db
-               database
-               (if incoming +graph-in-predicate-db+ +graph-out-predicate-db+))
-              (%graph-predicate-key database-name node-id predicate))
-      (values (%graph-dupsort-db
-               database
-               (if incoming +graph-in-db+ +graph-out-db+))
-              (%graph-adjacency-key database-name node-id))))
+      (let ((predicate-row (%lookup-predicate-row dbis predicate)))
+        (if predicate-row
+            (values (if incoming
+                        (graph-dbis-in-predicate dbis)
+                        (graph-dbis-out-predicate dbis))
+                    (%predicate-adjacency-key node-row predicate-row))
+            (values nil nil)))
+      (values (if incoming (graph-dbis-in dbis) (graph-dbis-out dbis))
+              node-row)))
 
 (defun fetch-node-edge-ids (database node-id
                             &key
                               (database-name (get-default-graph-db))
                               incoming
                               predicate)
-  "Return edge IDs incident on NODE-ID.
-
-When PREDICATE is supplied Tek9 uses the predicate-specific adjacency B+tree
-instead of filtering the node's entire incident edge set."
-  (multiple-value-bind (adjacency adjacency-key)
-      (%adjacency-db-and-key database database-name node-id incoming predicate)
-    (let ((ids nil))
-      (with-database (database)
-        (lmdb:do-db-dup (value adjacency adjacency-key)
-          (multiple-value-bind (neighbor-id edge-id)
-              (%decode-adjacency-value value)
-            (declare (ignore neighbor-id))
-            (push edge-id ids))))
-      (nreverse ids))))
+  "Return external edge IDs incident on NODE-ID."
+  (let ((dbis (ensure-graph-dbs database)))
+    (with-database (database)
+      (let ((node-row (%lookup-node-row dbis database-name node-id)))
+        (unless node-row
+          (return-from fetch-node-edge-ids nil))
+        (multiple-value-bind (adjacency key)
+            (%adjacency-db-and-key dbis node-row predicate incoming)
+          (unless adjacency
+            (return-from fetch-node-edge-ids nil))
+          (let ((ids nil))
+            (lmdb:do-db-dup (value adjacency key)
+              (multiple-value-bind (neighbor-row edge-row)
+                  (%decode-uint64-pair value)
+                (declare (ignore neighbor-row))
+                (let ((bytes (lmdb:g3t (graph-dbis-edges dbis) edge-row)))
+                  (when bytes
+                    (push (edge-id (%decode-document-or-object bytes)) ids)))))
+            (nreverse ids)))))))
 
 (defun fetch-node-edges (database node-id
                          &key
                            (database-name (get-default-graph-db))
                            incoming
                            predicate)
-  "Return edge objects incident on NODE-ID using indexed adjacency."
-  (let ((edge-db (%graph-edge-db database)))
-    (multiple-value-bind (adjacency adjacency-key)
-        (%adjacency-db-and-key database database-name node-id incoming predicate)
-      (let ((edges nil))
-        (with-database (database)
-          (lmdb:do-db-dup (value adjacency adjacency-key)
-            (multiple-value-bind (neighbor-id edge-id)
-                (%decode-adjacency-value value)
-              (declare (ignore neighbor-id))
-              (let ((bytes
-                      (lmdb:g3t edge-db
-                                (%graph-edge-key database-name edge-id))))
-                (when bytes
-                  (push (%decode-document-or-object bytes) edges))))))
-        (nreverse edges)))))
+  "Return edge objects incident on NODE-ID."
+  (let ((dbis (ensure-graph-dbs database)))
+    (with-database (database)
+      (let ((node-row (%lookup-node-row dbis database-name node-id)))
+        (unless node-row
+          (return-from fetch-node-edges nil))
+        (multiple-value-bind (adjacency key)
+            (%adjacency-db-and-key dbis node-row predicate incoming)
+          (unless adjacency
+            (return-from fetch-node-edges nil))
+          (let ((edges nil))
+            (lmdb:do-db-dup (value adjacency key)
+              (multiple-value-bind (neighbor-row edge-row)
+                  (%decode-uint64-pair value)
+                (declare (ignore neighbor-row))
+                (let ((bytes (lmdb:g3t (graph-dbis-edges dbis) edge-row)))
+                  (when bytes
+                    (push (%decode-document-or-object bytes) edges)))))
+            (nreverse edges)))))))
 
 (defun fetch-node-neighbors (database node-id
                              &key
                                (database-name (get-default-graph-db))
                                incoming
                                predicate)
-  "Return neighboring NODE objects in one LMDB snapshot.
+  "Return neighboring NODE objects using fixed-width adjacency records.
 
-The adjacency value already contains the neighbor id, so this path performs one
-adjacency scan plus one node lookup per result and does not read/decode edge
-records. PREDICATE selects the predicate-specific adjacency index when supplied."
-  (let ((nodes (get-graph-db database)))
-    (multiple-value-bind (adjacency adjacency-key)
-        (%adjacency-db-and-key database database-name node-id incoming predicate)
-      (let ((neighbors nil))
-        (with-database (database)
-          (lmdb:do-db-dup (value adjacency adjacency-key)
-            (multiple-value-bind (neighbor-id edge-id)
-                (%decode-adjacency-value value)
-              (declare (ignore edge-id))
-              (let ((node-bytes
-                      (lmdb:g3t nodes
-                                (%graph-node-key database-name neighbor-id))))
-                (when node-bytes
-                  (push (%decode-document-or-object node-bytes)
-                        neighbors))))))
-        (nreverse neighbors)))))
+After resolving NODE-ID once, traversal stays entirely on uint64/fixed-octet
+keyspaces: one DUPSORT scan plus one integer-key node lookup per result. Edge
+records are not touched."
+  (let ((dbis (ensure-graph-dbs database)))
+    (with-database (database)
+      (let ((node-row (%lookup-node-row dbis database-name node-id)))
+        (unless node-row
+          (return-from fetch-node-neighbors nil))
+        (multiple-value-bind (adjacency key)
+            (%adjacency-db-and-key dbis node-row predicate incoming)
+          (unless adjacency
+            (return-from fetch-node-neighbors nil))
+          (let ((neighbors nil))
+            (lmdb:do-db-dup (value adjacency key)
+              (multiple-value-bind (neighbor-row edge-row)
+                  (%decode-uint64-pair value)
+                (declare (ignore edge-row))
+                (let ((bytes (lmdb:g3t (graph-dbis-nodes dbis) neighbor-row)))
+                  (when bytes
+                    (push (%decode-document-or-object bytes) neighbors)))))
+            (nreverse neighbors)))))))
 
 (defun delete-edge (database edge &key (database-name (get-default-graph-db)))
-  "Delete EDGE and all adjacency references atomically."
-  (multiple-value-bind (nodes edge-db out-db in-db out-predicate-db in-predicate-db)
-      (ensure-graph-dbs database)
-    (declare (ignore nodes))
-    (let* ((id (edge-id edge))
-           (source (edge-source edge))
-           (target (edge-target edge))
-           (predicate (edge-predicate edge))
-           (out-value (%adjacency-value target id))
-           (in-value (%adjacency-value source id)))
-      (with-database (database :write t)
-        (lmdb:del edge-db (%graph-edge-key database-name id))
-        (lmdb:del out-db
-                  (%graph-adjacency-key database-name source)
-                  :value out-value)
-        (lmdb:del in-db
-                  (%graph-adjacency-key database-name target)
-                  :value in-value)
-        (lmdb:del out-predicate-db
-                  (%graph-predicate-key database-name source predicate)
-                  :value out-value)
-        (lmdb:del in-predicate-db
-                  (%graph-predicate-key database-name target predicate)
-                  :value in-value))))
+  "Delete EDGE, its external-id mapping, and all adjacency entries atomically."
+  (let ((dbis (ensure-graph-dbs database)))
+    (with-database (database :write t)
+      (let ((edge-row (%lookup-edge-row dbis database-name (edge-id edge))))
+        (when edge-row
+          (let ((bytes (lmdb:g3t (graph-dbis-edges dbis) edge-row)))
+            (when bytes
+              (%remove-edge-adjacency
+               dbis database-name edge-row
+               (%decode-document-or-object bytes))))
+          (lmdb:del (graph-dbis-edges dbis) edge-row)
+          (lmdb:del (graph-dbis-edge-map dbis)
+                    (%external-edge-key database-name (edge-id edge)))))))
   t)
