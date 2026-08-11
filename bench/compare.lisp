@@ -270,7 +270,7 @@
               (read-count 5000)
               (query-count 5000)
               (queries 250)
-              (index-build-count 20000)
+              (index-build-count 100000)
               (buckets 1000)
               (graph-ingest-fanout 5000)
               (graph-fanout 2000)
