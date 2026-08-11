@@ -167,17 +167,73 @@
       (close-database row-maintained)
       (close-database bulk-built))))
 
+(defun graph-neighbors-via-edge-objects (db graph-name center)
+  "Reference traversal: materialize edges, then resolve their target nodes."
+  (let ((ids (mapcar #'edge-target
+                     (fetch-node-edges db center
+                                       :database-name graph-name
+                                       :predicate "knows"))))
+    (fetch-bulk-nodes db ids :database-name graph-name)))
+
+(defun benchmark-graph-neighbors (fanout queries)
+  (let* ((db (fresh-db #P"/tmp/tek9-bench-graph/"))
+         (graph-name "fanout")
+         (center "center")
+         (leaves
+           (loop for i below fanout
+                 collect (make-instance 'node
+                                        :id (format nil "node-~8,'0d" i))))
+         (edges
+           (loop for node in leaves
+                 for i from 0
+                 collect (make-instance 'edge
+                                        :id (format nil "edge-~8,'0d" i)
+                                        :source center
+                                        :predicate "knows"
+                                        :target (node-id node)))))
+    (unwind-protect
+         (progn
+           (put-nodes db
+                      (cons (make-instance 'node :id center) leaves)
+                      :database-name graph-name)
+           (put-edges db edges :database-name graph-name)
+           (graph-neighbors-via-edge-objects db graph-name center)
+           (fetch-node-neighbors db center
+                                 :database-name graph-name
+                                 :predicate "knows")
+           (let ((slow
+                   (elapsed-seconds
+                    (lambda ()
+                      (loop repeat queries
+                            do (graph-neighbors-via-edge-objects
+                                db graph-name center)))))
+                 (fast
+                   (elapsed-seconds
+                    (lambda ()
+                      (loop repeat queries
+                            do (fetch-node-neighbors
+                                db center
+                                :database-name graph-name
+                                :predicate "knows"))))))
+             (report-normalized-pair
+              "graph neighbors: edge materialization vs direct adjacency payload"
+              slow queries fast queries)))
+      (close-database db))))
+
 (defun run (&key
               (write-count 1000)
               (read-count 5000)
               (query-count 5000)
               (queries 250)
               (index-build-count 20000)
-              (buckets 1000))
+              (buckets 1000)
+              (graph-fanout 2000)
+              (graph-queries 50))
   (format t "~&Tek9 comparative microbenchmarks (durability=:FULL)~%")
   (benchmark-write-batching write-count)
   (benchmark-bulk-read read-count)
   (benchmark-secondary-index query-count queries buckets)
   (benchmark-index-rebuild index-build-count buckets)
   (benchmark-indexed-initial-load index-build-count buckets)
+  (benchmark-graph-neighbors graph-fanout graph-queries)
   (values))
