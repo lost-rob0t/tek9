@@ -173,6 +173,19 @@ Tek9 environment."
     (lmdb:put meta key next)
     next))
 
+(defun %reserve-row-ids (meta key count)
+  "Reserve COUNT consecutive row IDs with one counter read and one counter write.
+
+Returns the first reserved row ID and the exclusive upper bound. A zero COUNT
+performs no LMDB write."
+  (if (zerop count)
+      (values 0 0)
+      (let* ((current (or (lmdb:g3t meta key) 0))
+             (first (1+ current))
+             (limit (+ first count)))
+        (lmdb:put meta key (1- limit))
+        (values first limit))))
+
 (defun %lookup-node-row (dbis graph-name external-id)
   (lmdb:g3t (graph-dbis-node-map dbis)
             (%external-node-key graph-name external-id)))
@@ -261,17 +274,42 @@ Tek9 environment."
         (lmdb:put (graph-dbis-nodes dbis) row (%* node))))
     node))
 
-(defun put-nodes (database nodes &key (database-name (get-default-graph-db)) sorted)
-  "Persist NODES in one transaction using compact internal uint64 row IDs.
-
-SORTED is retained for API compatibility; internal row IDs are allocated
-monotonically, so new rows naturally follow LMDB's integer-key order."
-  (declare (ignore sorted))
+(defun %put-nodes-per-row-counter
+    (database nodes &key (database-name (get-default-graph-db)))
+  "Reference implementation: allocate each new node row through the meta counter."
   (let ((dbis (ensure-graph-dbs database)))
     (with-database (database :write t)
       (dolist (node nodes)
         (let ((row (%ensure-node-row dbis database-name (node-id node))))
           (lmdb:put (graph-dbis-nodes dbis) row (%* node)))))
+    nodes))
+
+(defun put-nodes (database nodes &key (database-name (get-default-graph-db)) sorted)
+  "Persist NODES in one transaction using one row-ID reservation per batch.
+
+Existing rows keep their IDs. New rows are discovered first, then a contiguous
+uint64 block is reserved with one meta read/write instead of mutating the row
+counter once per node. SORTED is retained for API compatibility."
+  (declare (ignore sorted))
+  (let ((dbis (ensure-graph-dbs database)))
+    (with-database (database :write t)
+      (let ((pending nil))
+        (dolist (node nodes)
+          (let ((row (%lookup-node-row dbis database-name (node-id node))))
+            (if row
+                (lmdb:put (graph-dbis-nodes dbis) row (%* node))
+                (push node pending))))
+        (multiple-value-bind (row limit)
+            (%reserve-row-ids (graph-dbis-meta dbis)
+                              +next-node-id-key+
+                              (length pending))
+          (declare (ignore limit))
+          (dolist (node (nreverse pending))
+            (lmdb:put (graph-dbis-node-map dbis)
+                      (%external-node-key database-name (node-id node))
+                      row)
+            (lmdb:put (graph-dbis-nodes dbis) row (%* node))
+            (incf row)))))
     nodes))
 
 (defun fetch-node (database id &key (database-name (get-default-graph-db)))
@@ -302,15 +340,11 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
   (put-edges database (list edge) :database-name database-name)
   edge)
 
-(defun %put-adjacency (db key neighbor-row edge-row)
-  (lmdb:put db
-            key
-            (%adjacency-value neighbor-row edge-row)
-            :dupdata nil
-            :key-exists-error-p nil))
+(defun %put-adjacency-value (db key value)
+  (lmdb:put db key value :dupdata nil :key-exists-error-p nil))
 
-(defun %delete-adjacency (db key neighbor-row edge-row)
-  (lmdb:del db key :value (%adjacency-value neighbor-row edge-row)))
+(defun %delete-adjacency-value (db key value)
+  (lmdb:del db key :value value))
 
 (defun %remove-edge-adjacency (dbis graph-name edge-row edge
                                &key node-cache predicate-cache)
@@ -322,20 +356,25 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
          (predicate-row (%lookup-predicate-row-cached
                          dbis (edge-predicate edge) predicate-cache)))
     (when (and source-row target-row)
-      (%delete-adjacency (graph-dbis-out dbis)
-                         source-row target-row edge-row)
-      (%delete-adjacency (graph-dbis-in dbis)
-                         target-row source-row edge-row)
-      (when predicate-row
-        (%delete-adjacency (graph-dbis-out-predicate dbis)
-                           (%predicate-adjacency-key source-row predicate-row)
-                           target-row edge-row)
-        (%delete-adjacency (graph-dbis-in-predicate dbis)
-                           (%predicate-adjacency-key target-row predicate-row)
-                           source-row edge-row)))))
+      (let ((out-value (%adjacency-value target-row edge-row))
+            (in-value (%adjacency-value source-row edge-row)))
+        (%delete-adjacency-value (graph-dbis-out dbis)
+                                 source-row out-value)
+        (%delete-adjacency-value (graph-dbis-in dbis)
+                                 target-row in-value)
+        (when predicate-row
+          (%delete-adjacency-value
+           (graph-dbis-out-predicate dbis)
+           (%predicate-adjacency-key source-row predicate-row)
+           out-value)
+          (%delete-adjacency-value
+           (graph-dbis-in-predicate dbis)
+           (%predicate-adjacency-key target-row predicate-row)
+           in-value))))))
 
-(defun %insert-edge (dbis graph-name edge &key node-cache predicate-cache)
-  "Insert or replace one EDGE in the active write transaction."
+(defun %write-edge-row (dbis graph-name edge edge-row existing-row-p
+                        &key node-cache predicate-cache)
+  "Write EDGE to EDGE-ROW and maintain every adjacency index in the active txn."
   (let* ((source-row (%lookup-node-row-cached
                       dbis graph-name (edge-source edge) node-cache))
          (target-row (%lookup-node-row-cached
@@ -346,12 +385,9 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
     (unless target-row
       (error "Unknown target node ~S in graph ~S."
              (edge-target edge) graph-name))
-    (let* ((existing-row (%lookup-edge-row dbis graph-name (edge-id edge)))
-           (edge-row (or existing-row
-                         (%ensure-edge-row dbis graph-name (edge-id edge))))
-           (predicate-row (%ensure-predicate-row-cached
-                           dbis (edge-predicate edge) predicate-cache)))
-      (when existing-row
+    (let ((predicate-row (%ensure-predicate-row-cached
+                          dbis (edge-predicate edge) predicate-cache)))
+      (when existing-row-p
         (let ((previous-bytes (lmdb:g3t (graph-dbis-edges dbis) edge-row)))
           (when previous-bytes
             (%remove-edge-adjacency
@@ -359,18 +395,29 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
              (%decode-document-or-object previous-bytes)
              :node-cache node-cache
              :predicate-cache predicate-cache))))
-      (lmdb:put (graph-dbis-edges dbis) edge-row (%* edge))
-      (%put-adjacency (graph-dbis-out dbis)
-                      source-row target-row edge-row)
-      (%put-adjacency (graph-dbis-in dbis)
-                      target-row source-row edge-row)
-      (%put-adjacency (graph-dbis-out-predicate dbis)
-                      (%predicate-adjacency-key source-row predicate-row)
-                      target-row edge-row)
-      (%put-adjacency (graph-dbis-in-predicate dbis)
-                      (%predicate-adjacency-key target-row predicate-row)
-                      source-row edge-row)
+      (let ((out-value (%adjacency-value target-row edge-row))
+            (in-value (%adjacency-value source-row edge-row))
+            (out-key (%predicate-adjacency-key source-row predicate-row))
+            (in-key (%predicate-adjacency-key target-row predicate-row)))
+        (lmdb:put (graph-dbis-edges dbis) edge-row (%* edge))
+        (%put-adjacency-value (graph-dbis-out dbis)
+                              source-row out-value)
+        (%put-adjacency-value (graph-dbis-in dbis)
+                              target-row in-value)
+        (%put-adjacency-value (graph-dbis-out-predicate dbis)
+                              out-key out-value)
+        (%put-adjacency-value (graph-dbis-in-predicate dbis)
+                              in-key in-value))
       edge-row)))
+
+(defun %insert-edge (dbis graph-name edge &key node-cache predicate-cache)
+  "Reference single-edge path with per-row counter allocation."
+  (let* ((existing-row (%lookup-edge-row dbis graph-name (edge-id edge)))
+         (edge-row (or existing-row
+                       (%ensure-edge-row dbis graph-name (edge-id edge)))))
+    (%write-edge-row dbis graph-name edge edge-row (not (null existing-row))
+                     :node-cache node-cache
+                     :predicate-cache predicate-cache)))
 
 (defun %put-edges-uncached (database edges
                             &key (database-name (get-default-graph-db)))
@@ -384,17 +431,43 @@ monotonically, so new rows naturally follow LMDB's integer-key order."
 (defun put-edges (database edges &key (database-name (get-default-graph-db)))
   "Persist EDGES and every adjacency index atomically.
 
-External node and predicate IDs are memoized only for this write transaction.
-The cache removes repeated string-key LMDB lookups in fan-out/fan-in batches but
-never outlives the transaction, so LMDB remains the source of truth."
+The batch resolves each external edge ID once, reserves one contiguous uint64
+row-ID block for all new edges, and updates the edge counter once. Node and
+predicate mappings are memoized only for this transaction."
   (let ((dbis (ensure-graph-dbs database))
         (node-cache (make-hash-table :test #'equal))
         (predicate-cache (make-hash-table :test #'equal)))
     (with-database (database :write t)
-      (dolist (edge edges)
-        (%insert-edge dbis database-name edge
-                      :node-cache node-cache
-                      :predicate-cache predicate-cache)))
+      (let ((prepared nil)
+            (new-count 0))
+        (dolist (edge edges)
+          (let ((existing-row
+                  (%lookup-edge-row dbis database-name (edge-id edge))))
+            (unless existing-row
+              (incf new-count))
+            (push (cons edge existing-row) prepared)))
+        (multiple-value-bind (next-row limit)
+            (%reserve-row-ids (graph-dbis-meta dbis)
+                              +next-edge-id-key+
+                              new-count)
+          (dolist (entry (nreverse prepared))
+            (let* ((edge (car entry))
+                   (existing-row (cdr entry))
+                   (edge-row
+                     (or existing-row
+                         (prog1 next-row
+                           (lmdb:put (graph-dbis-edge-map dbis)
+                                     (%external-edge-key
+                                      database-name (edge-id edge))
+                                     next-row)
+                           (incf next-row)))))
+              (%write-edge-row
+               dbis database-name edge edge-row (not (null existing-row))
+               :node-cache node-cache
+               :predicate-cache predicate-cache)))
+          (unless (= next-row limit)
+            (error "Tek9 edge row reservation invariant failed: ~D != ~D."
+                   next-row limit)))))
     edges))
 
 (defun put-edges* (database edge-list &key (database-name (get-default-graph-db)))
