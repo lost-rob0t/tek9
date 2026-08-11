@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate repeated Tek9 benchmark JSON files using medians."""
+"""Aggregate repeated Tek9 benchmark JSON files using robust summaries."""
 
 from __future__ import annotations
 
@@ -15,6 +15,12 @@ NUMERIC_FIELDS = ("reference_seconds", "fast_seconds", "speedup")
 def load(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def median_absolute_deviation(values: list[float]) -> float:
+    """Return the unscaled median absolute deviation around the median."""
+    center = statistics.median(values)
+    return statistics.median(abs(value - center) for value in values)
 
 
 def main() -> int:
@@ -37,17 +43,24 @@ def main() -> int:
     metrics: dict[str, dict] = {}
     for name in sorted(metric_names):
         samples = [run["metrics"][name] for run in runs]
-        aggregate = {
-            field: statistics.median(float(sample[field]) for sample in samples)
+        numeric_samples = {
+            field: [float(sample[field]) for sample in samples]
             for field in NUMERIC_FIELDS
         }
+        aggregate = {
+            field: statistics.median(values)
+            for field, values in numeric_samples.items()
+        }
+        fast_runs = numeric_samples["fast_seconds"]
+        aggregate["fast_run_seconds"] = fast_runs
+        aggregate["fast_mad_seconds"] = median_absolute_deviation(fast_runs)
         aggregate["reference_samples"] = int(samples[0].get("reference_samples", 1))
         aggregate["fast_samples"] = int(samples[0].get("fast_samples", 1))
         aggregate["runs"] = len(samples)
         metrics[name] = aggregate
 
     result = {
-        "schema_version": 2,
+        "schema_version": 3,
         "commit": args.commit,
         "durability": runs[0].get("durability", "unknown"),
         "aggregation": "median",
@@ -62,7 +75,7 @@ def main() -> int:
         json.dump(result, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
-    print(f"Wrote median of {len(runs)} runs to {args.output}")
+    print(f"Wrote robust summary of {len(runs)} runs to {args.output}")
     return 0
 
 

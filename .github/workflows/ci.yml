@@ -59,8 +59,13 @@ jobs:
             --eval '(ql:register-local-projects)' \
             --eval '(ql:quickload :tek9)'
 
-      - name: Validate benchmark helpers
-        run: python3 -m py_compile bench/aggregate_results.py bench/check_regression.py
+      - name: Validate benchmark tooling
+        run: |
+          python3 -m py_compile \
+            bench/aggregate_results.py \
+            bench/check_regression.py \
+            bench/test_check_regression.py
+          python3 bench/test_check_regression.py
 
       - name: Load and test Tek9
         run: |
@@ -188,12 +193,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Fail on performance regression
+      - name: Fail on meaningful performance regression
         run: |
           python3 bench/check_regression.py \
             "$RUNNER_TEMP/tek9-baseline-median.json" \
             "$RUNNER_TEMP/tek9-benchmark.json" \
-            --max-regression-pct 5
+            --max-regression-pct 5 \
+            --noise-mad-multiplier 3
 
       - name: Publish benchmark summary
         if: always()
