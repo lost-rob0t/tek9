@@ -1,9 +1,9 @@
 (in-package :tek9)
 
-(defconstant +graph-node-db+ "graph/nodes")
-(defconstant +graph-edge-db+ "graph/edges")
-(defconstant +graph-out-db+ "graph/out")
-(defconstant +graph-in-db+ "graph/in")
+(defparameter +graph-node-db+ "graph/nodes")
+(defparameter +graph-edge-db+ "graph/edges")
+(defparameter +graph-out-db+ "graph/out")
+(defparameter +graph-in-db+ "graph/in")
 
 (defclass node ()
   ((id :initarg :id :initform (make-key-id) :accessor node-id)
