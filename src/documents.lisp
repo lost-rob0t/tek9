@@ -58,35 +58,44 @@ Secondary indexes are maintained in the same LMDB transaction as the document."
 (defun put-bulk (database documents
                  &key
                    (database-name +main-name+)
-                   sorted)
+                   sorted
+                   track-changes)
   "Write DOCUMENTS in one LMDB write transaction.
 
-When SORTED is true, caller promises ids are in LMDB key order and Tek9 uses
-MDB_APPEND through the binding. This removes B+tree key-position searches and
-is the preferred path for initial bulk loads."
+SORTED is a performance hint. Tek9 uses MDB_APPEND only if the first input key
+is beyond the physical database's current final key; otherwise it safely falls
+back to ordinary insertion. TRACK-CHANGES is opt-in for materialized-view
+workflows so large imports do not allocate a second list/vector of every id."
   (let* ((db (%main-db database database-name))
          (indexes (secondary-indexes-for database database-name)))
     (with-database (database :write t)
-      (dolist (document documents)
-        (touch-document database document)
-        (let ((previous (when indexes
-                          (%decode-document (lmdb:g3t db (doc-id document))))))
-          (update-secondary-indexes database previous document database-name)
-          (lmdb:put db
-                    (doc-id document)
-                    (%* document)
-                    :append sorted))))
+      (let ((append-p (and sorted
+                           documents
+                           (%append-safe-p db (doc-id (first documents))))))
+        (dolist (document documents)
+          (when track-changes
+            (touch-document database document))
+          (let ((previous (when (and indexes (not append-p))
+                            (%decode-document
+                             (lmdb:g3t db (doc-id document))))))
+            (update-secondary-indexes database previous document database-name)
+            (lmdb:put db
+                      (doc-id document)
+                      (%* document)
+                      :append append-p)))))
     documents))
 
 (defun put-bulk* (database documents
                   &key
                     (database-name +main-name+)
-                    sorted)
+                    sorted
+                    track-changes)
   (put-bulk database
             (loop for (key value) in documents
                   collect (new-document :id key :value value))
             :database-name database-name
-            :sorted sorted))
+            :sorted sorted
+            :track-changes track-changes))
 
 (defun put-json (database json)
   (let* ((json-data (jsown:parse json))
