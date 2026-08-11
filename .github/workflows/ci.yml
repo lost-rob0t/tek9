@@ -50,6 +50,15 @@ jobs:
             --load "$RUNNER_TEMP/quicklisp.lisp" \
             --eval '(quicklisp-quickstart:install :path (merge-pathnames "quicklisp/" (user-homedir-pathname)))'
 
+      - name: Verify documented Quicklisp install layout
+        run: |
+          mkdir -p "$HOME/quicklisp/local-projects"
+          ln -s "$GITHUB_WORKSPACE" "$HOME/quicklisp/local-projects/tek9"
+          sbcl --non-interactive \
+            --load "$HOME/quicklisp/setup.lisp" \
+            --eval '(ql:register-local-projects)' \
+            --eval '(ql:quickload :tek9)'
+
       - name: Validate benchmark helpers
         run: python3 -m py_compile bench/aggregate_results.py bench/check_regression.py
 
