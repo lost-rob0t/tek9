@@ -4,7 +4,7 @@
   :license "MIT"
   :version "0.2.0"
   :serial t
-  :depends-on (#:alexandria #:serapeum #:jsown #:cl-ulid #:lmdb #:cl-conspack)
+  :depends-on (#:alexandria #:bordeaux-threads #:serapeum #:jsown #:lmdb #:cl-conspack)
   :components ((:file "package")
                (:file "objects")
                (:file "documents")
