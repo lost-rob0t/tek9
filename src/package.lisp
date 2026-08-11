@@ -25,9 +25,9 @@
    :index-document-ids :index-fetch :select :select-primary-range
    :select-index :select-index-range
    ;; graph
-   :node :node-id :node-props :node-edges :edge :edge-source :edge-predicate
-   :edge-target :edge-key :get-default-graph-db :get-graph-db :put-node
-   :put-nodes :fetch-node :fetch-bulk-nodes :add-node-edge :put-edge
+   :node :node-id :node-props :node-edges :edge :edge-id :edge-source
+   :edge-predicate :edge-target :edge-key :get-default-graph-db :get-graph-db
+   :put-node :put-nodes :fetch-node :fetch-bulk-nodes :add-node-edge :put-edge
    :put-edges :put-edges* :fetch-node-edge-ids :fetch-node-edges
    :fetch-node-neighbors :delete-edge
    ;; views
