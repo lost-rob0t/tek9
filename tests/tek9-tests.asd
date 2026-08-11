@@ -9,4 +9,7 @@
                (:file "create-db")
                (:file "test-documents")
                (:file "test-indexes")
-               (:file "test-graphs")))
+               (:file "test-graphs"))
+  :perform (test-op (operation component)
+             (declare (ignore operation component))
+             (uiop:symbol-call :fiveam :run! :tek9-tests)))
