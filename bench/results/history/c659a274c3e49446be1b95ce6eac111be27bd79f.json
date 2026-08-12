@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "commit": "c659a274c3e49446be1b95ce6eac111be27bd79f",
+  "durability": "full",
+  "metrics": {
+    "full-durability-write-batching": {"reference_seconds": 0.272002995, "fast_seconds": 0.006000000, "speedup": 45.333831787, "reference_samples": 1, "fast_samples": 1},
+    "bulk-point-read-single-snapshot": {"reference_seconds": 0.022000000, "fast_seconds": 0.026001001, "speedup": 0.846121252, "reference_samples": 1, "fast_samples": 1},
+    "selective-equality-index": {"reference_seconds": 0.019404260, "fast_seconds": 0.000022200, "speedup": 874.050048828, "reference_samples": 250, "fast_samples": 10000},
+    "secondary-index-rebuild": {"reference_seconds": 0.096000001, "fast_seconds": 0.099000998, "speedup": 0.969687223, "reference_samples": 1, "fast_samples": 1},
+    "indexed-initial-load": {"reference_seconds": 0.149002001, "fast_seconds": 0.141001001, "speedup": 1.056744218, "reference_samples": 1, "fast_samples": 1},
+    "graph-neighbor-direct-adjacency": {"reference_seconds": 0.016660219, "fast_seconds": 0.006660100, "speedup": 2.501496792, "reference_samples": 50, "fast_samples": 50}
+  }
+}

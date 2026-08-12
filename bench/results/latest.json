@@ -1,0 +1,66 @@
+{
+  "aggregation": "median",
+  "baseline_commit": "b46e5850d22b7dd3de967016b4be4d1ccce41d5b",
+  "commit": "47a00a20a9d5c52c8f4edde86a3928d96fcc6571",
+  "durability": "full",
+  "metrics": {
+    "bulk-point-read-single-snapshot": {
+      "fast_samples": 1,
+      "fast_seconds": 0.016000999,
+      "reference_samples": 1,
+      "reference_seconds": 0.026001999,
+      "runs": 4,
+      "speedup": 1.6249922515
+    },
+    "full-durability-write-batching": {
+      "fast_samples": 1,
+      "fast_seconds": 0.026001999,
+      "reference_samples": 1,
+      "reference_seconds": 1.25008899,
+      "runs": 4,
+      "speedup": 48.1920223235
+    },
+    "graph-edge-batch-row-cache": {
+      "fast_samples": 1,
+      "fast_seconds": 0.054003999,
+      "reference_samples": 1,
+      "reference_seconds": 0.0645045005,
+      "runs": 4,
+      "speedup": 1.194439352
+    },
+    "graph-neighbor-direct-adjacency": {
+      "fast_samples": 50,
+      "fast_seconds": 0.00620045,
+      "reference_samples": 50,
+      "reference_seconds": 0.01436099,
+      "runs": 4,
+      "speedup": 2.3065822125
+    },
+    "indexed-initial-load": {
+      "fast_samples": 1,
+      "fast_seconds": 0.583542019,
+      "reference_samples": 1,
+      "reference_seconds": 0.6375454965,
+      "runs": 4,
+      "speedup": 1.0906733275
+    },
+    "secondary-index-rebuild": {
+      "fast_samples": 1,
+      "fast_seconds": 0.4040299955,
+      "reference_samples": 1,
+      "reference_seconds": 0.4220304935,
+      "runs": 4,
+      "speedup": 1.044654846
+    },
+    "selective-equality-index": {
+      "fast_samples": 10000,
+      "fast_seconds": 1.8852000000000002e-05,
+      "reference_samples": 250,
+      "reference_seconds": 0.0164851825,
+      "runs": 4,
+      "speedup": 872.254699707
+    }
+  },
+  "run_count": 4,
+  "schema_version": 2
+}

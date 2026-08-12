@@ -1,0 +1,241 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - bench/results/latest.json
+      - bench/results/history/**
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+    steps:
+      - name: Checkout current commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sbcl liblmdb-dev libffi-dev curl python3
+
+      - name: Install Quicklisp
+        run: |
+          curl --retry 5 --retry-all-errors -fsSLo "$RUNNER_TEMP/quicklisp.lisp" \
+            https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive \
+            --load "$RUNNER_TEMP/quicklisp.lisp" \
+            --eval '(quicklisp-quickstart:install :path (merge-pathnames "quicklisp/" (user-homedir-pathname)))'
+
+      - name: Verify documented Quicklisp install layout
+        run: |
+          mkdir -p "$HOME/quicklisp/local-projects"
+          ln -s "$GITHUB_WORKSPACE" "$HOME/quicklisp/local-projects/tek9"
+          sbcl --non-interactive \
+            --load "$HOME/quicklisp/setup.lisp" \
+            --eval '(ql:register-local-projects)' \
+            --eval '(ql:quickload :tek9)'
+
+      - name: Validate benchmark tooling
+        run: |
+          python3 -m py_compile \
+            bench/aggregate_results.py \
+            bench/check_regression.py \
+            bench/test_check_regression.py
+          python3 bench/test_check_regression.py
+
+      - name: Load and test Tek9
+        run: |
+          sbcl --non-interactive \
+            --load "$HOME/quicklisp/setup.lisp" \
+            --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
+            --eval '(asdf:load-asd (truename "tests/tek9-tests.asd"))' \
+            --eval '(ql:quickload :tek9-tests)' \
+            --eval '(asdf:test-system :tek9-tests)'
+
+  package:
+    name: package-smoke
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout current commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Build source archive
+        run: |
+          VERSION="$(sed -n 's/.*:version "\([^"]*\)".*/\1/p' src/tek9.asd | head -n 1)"
+          test -n "$VERSION"
+          git archive \
+            --format=tar.gz \
+            --prefix="tek9-${VERSION}/" \
+            --output="$RUNNER_TEMP/tek9-${VERSION}.tar.gz" \
+            HEAD
+          tar -tzf "$RUNNER_TEMP/tek9-${VERSION}.tar.gz" | grep -q "tek9-${VERSION}/src/tek9.asd"
+          tar -tzf "$RUNNER_TEMP/tek9-${VERSION}.tar.gz" | grep -q "tek9-${VERSION}/README.org"
+          tar -tzf "$RUNNER_TEMP/tek9-${VERSION}.tar.gz" | grep -q "tek9-${VERSION}/LICENSE"
+
+  benchmark:
+    name: benchmark-regression
+    needs: test
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout current commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sbcl liblmdb-dev libffi-dev curl python3
+
+      - name: Install Quicklisp
+        run: |
+          curl --retry 5 --retry-all-errors -fsSLo "$RUNNER_TEMP/quicklisp.lisp" \
+            https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive \
+            --load "$RUNNER_TEMP/quicklisp.lisp" \
+            --eval '(quicklisp-quickstart:install :path (merge-pathnames "quicklisp/" (user-homedir-pathname)))'
+
+      - name: Prepare parent commit benchmark
+        run: |
+          CURRENT_SHA="$(git rev-parse HEAD)"
+          BASE_SHA="$(git rev-parse HEAD^)"
+          echo "CURRENT_SHA=${CURRENT_SHA}" >> "$GITHUB_ENV"
+          echo "BASE_SHA=${BASE_SHA}" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/tek9-baseline" "$BASE_SHA"
+
+      - name: Benchmark parent and current on same runner
+        run: |
+          HARNESS="$GITHUB_WORKSPACE/bench/compare.lisp"
+          BASE_ROOT="$RUNNER_TEMP/tek9-baseline"
+
+          run_bench() {
+            root="$1"
+            output="$2"
+            commit="$3"
+            (
+              cd "$root"
+              BENCHMARK_JSON="$output" \
+              BENCHMARK_COMMIT="$commit" \
+              sbcl --non-interactive \
+                --load "$HOME/quicklisp/setup.lisp" \
+                --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
+                --eval '(ql:quickload :tek9)' \
+                --load "$HARNESS" \
+                --eval '(tek9-bench-compare:run-and-write)'
+            )
+          }
+
+          run_bench "$BASE_ROOT" "$RUNNER_TEMP/base-1.json" "$BASE_SHA"
+          run_bench "$GITHUB_WORKSPACE" "$RUNNER_TEMP/current-1.json" "$CURRENT_SHA"
+
+          run_bench "$GITHUB_WORKSPACE" "$RUNNER_TEMP/current-2.json" "$CURRENT_SHA"
+          run_bench "$BASE_ROOT" "$RUNNER_TEMP/base-2.json" "$BASE_SHA"
+
+          run_bench "$BASE_ROOT" "$RUNNER_TEMP/base-3.json" "$BASE_SHA"
+          run_bench "$GITHUB_WORKSPACE" "$RUNNER_TEMP/current-3.json" "$CURRENT_SHA"
+
+          run_bench "$GITHUB_WORKSPACE" "$RUNNER_TEMP/current-4.json" "$CURRENT_SHA"
+          run_bench "$BASE_ROOT" "$RUNNER_TEMP/base-4.json" "$BASE_SHA"
+
+          python3 bench/aggregate_results.py \
+            --output "$RUNNER_TEMP/tek9-baseline-median.json" \
+            --commit "$BASE_SHA" \
+            "$RUNNER_TEMP/base-1.json" "$RUNNER_TEMP/base-2.json" \
+            "$RUNNER_TEMP/base-3.json" "$RUNNER_TEMP/base-4.json"
+
+          python3 bench/aggregate_results.py \
+            --output "$RUNNER_TEMP/tek9-benchmark.json" \
+            --commit "$CURRENT_SHA" \
+            --baseline-commit "$BASE_SHA" \
+            "$RUNNER_TEMP/current-1.json" "$RUNNER_TEMP/current-2.json" \
+            "$RUNNER_TEMP/current-3.json" "$RUNNER_TEMP/current-4.json"
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tek9-benchmark-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/tek9-baseline-median.json
+            ${{ runner.temp }}/tek9-benchmark.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail on meaningful performance regression
+        run: |
+          python3 bench/check_regression.py \
+            "$RUNNER_TEMP/tek9-baseline-median.json" \
+            "$RUNNER_TEMP/tek9-benchmark.json" \
+            --max-regression-pct 5 \
+            --noise-mad-multiplier 3
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          {
+            echo '## Tek9 benchmark evidence'
+            echo
+            echo "Current: \`${CURRENT_SHA:-unknown}\`"
+            echo "Baseline: \`${BASE_SHA:-unknown}\`"
+            echo
+            echo '```json'
+            cat "$RUNNER_TEMP/tek9-benchmark.json" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  merge-gate:
+    name: merge-gate
+    if: always()
+    needs:
+      - test
+      - package
+      - benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all merge checks
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          test "$TEST_RESULT" = success
+          test "$PACKAGE_RESULT" = success
+          if [ "$EVENT_NAME" = schedule ]; then
+            test "$BENCHMARK_RESULT" = skipped
+          else
+            test "$BENCHMARK_RESULT" = success
+          fi

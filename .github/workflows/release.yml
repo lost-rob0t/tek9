@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sbcl liblmdb-dev libffi-dev curl
+
+      - name: Install Quicklisp
+        run: |
+          curl --retry 5 --retry-all-errors -fsSLo "$RUNNER_TEMP/quicklisp.lisp" \
+            https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive \
+            --load "$RUNNER_TEMP/quicklisp.lisp" \
+            --eval '(quicklisp-quickstart:install :path (merge-pathnames "quicklisp/" (user-homedir-pathname)))'
+
+      - name: Verify tag matches ASDF version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          ASD_VERSION="$(sed -n 's/.*:version "\([^"]*\)".*/\1/p' src/tek9.asd | head -n 1)"
+          test -n "$ASD_VERSION"
+          if [ "$TAG_VERSION" != "$ASD_VERSION" ]; then
+            echo "tag version $TAG_VERSION does not match ASDF version $ASD_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Run full test suite
+        run: |
+          sbcl --non-interactive \
+            --load "$HOME/quicklisp/setup.lisp" \
+            --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
+            --eval '(asdf:load-asd (truename "tests/tek9-tests.asd"))' \
+            --eval '(ql:quickload :tek9-tests)' \
+            --eval '(asdf:test-system :tek9-tests)'
+
+  publish:
+    name: publish-release
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+
+      - name: Build release archive
+        id: package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="tek9-${VERSION}.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+
+          git archive \
+            --format=tar.gz \
+            --prefix="tek9-${VERSION}/" \
+            --output="$ARCHIVE" \
+            "$GITHUB_SHA"
+          sha256sum "$ARCHIVE" > "$CHECKSUM"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+
+      - name: Upload packaged source artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tek9-${{ steps.package.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.checksum }}" \
+            --verify-tag \
+            --generate-notes \
+            --title "Tek9 ${{ steps.package.outputs.version }}"
