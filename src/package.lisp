@@ -40,5 +40,7 @@
    :database-view :new-view :add-view :delete-view :clear-view :create-view-db
    :define-map :define-reduce :insert-results :apply-view
    :apply-view-to-database :with-views
+   :view-get :view-rows :map-view :reduce-view
+   :view-reducer-missing :view-reducer-missing-view
    ;; encoding
    :%* :$))
