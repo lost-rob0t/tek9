@@ -32,9 +32,9 @@
              (is (not found-p))
              (is (eq :missing value)))
 
-           (is (equal '(#1=("p1" . "Ada") ("p3" . "Lin"))
+           (is (equal '(("p1" . "Ada") ("p3" . "Lin"))
                       (view-rows db view)))
-           (is (equal '(#1#)
+           (is (equal '(("p1" . "Ada"))
                       (view-rows db view :start "p1" :end "p3")))
            (is (equal '(("p3" . "Lin"))
                       (view-rows db view :start "p3" :limit 1)))
