@@ -11,6 +11,12 @@
              (format stream "Tek9 view mapper failed: ~A"
                      (view-error-cause condition)))))
 
+(define-condition view-reducer-missing (error)
+  ((view :initarg :view :reader view-reducer-missing-view))
+  (:report (lambda (condition stream)
+             (format stream "Tek9 view ~S has no reducer."
+                     (view-name (view-reducer-missing-view condition))))))
+
 (defclass database-view ()
   ((name :initform "" :type string :accessor view-name :initarg :name)
    (map-fn :initform nil :accessor view-map :initarg :map)
@@ -136,6 +142,59 @@ The named LMDB DBI is retained because closing/deleting open DBIs is unsafe."
             (dolist (row (funcall (view-map view) (%decode-document bytes)))
               (lmdb:put target (car row) (%* (cdr row))))))))
     view))
+
+(defun view-get (database view key &optional default)
+  "Return the decoded materialized value for KEY in VIEW.
+
+Return DEFAULT and NIL when KEY is absent; otherwise return VALUE and T. Callers
+do not need to know that views are currently stored in LMDB."
+  (let ((db (create-view-db database view)))
+    (with-database (database)
+      (let ((bytes (lmdb:g3t db key)))
+        (if bytes
+            (values ($ bytes) t)
+            (values default nil))))))
+
+(defun view-rows (database view &key start end limit)
+  "Return decoded materialized rows from VIEW as (KEY . VALUE) conses.
+
+Rows are returned in storage key order. START is inclusive and END is exclusive.
+LIMIT, when non-NIL, bounds the number of returned rows. The public contract is
+independent of LMDB cursor details."
+  (when (and limit (minusp limit))
+    (error "VIEW-ROWS LIMIT must be non-negative or NIL."))
+  (let ((db (create-view-db database view))
+        (rows nil)
+        (count 0))
+    (with-database (database)
+      (lmdb:do-db (key bytes db :nodup t)
+        (when (and (or (null start) (not (string< key start)))
+                   (or (null end) (string< key end))
+                   (or (null limit) (< count limit)))
+          (push (cons key ($ bytes)) rows)
+          (incf count))))
+    (nreverse rows)))
+
+(defun map-view (database view function &key start end limit)
+  "Call FUNCTION with KEY and decoded VALUE for each selected materialized row.
+
+Return the number of rows visited. START/END/LIMIT have the same semantics as
+VIEW-ROWS."
+  (let ((count 0))
+    (dolist (row (view-rows database view :start start :end end :limit limit) count)
+      (funcall function (car row) (cdr row))
+      (incf count))))
+
+(defun reduce-view (database view &key start end limit)
+  "Apply VIEW's reducer to selected decoded materialized rows.
+
+Signal VIEW-REDUCER-MISSING when VIEW has no reducer. Reducers receive the same
+(KEY . VALUE) row shape returned by VIEW-ROWS."
+  (let ((reducer (view-reduce view)))
+    (unless reducer
+      (error 'view-reducer-missing :view view))
+    (funcall reducer
+             (view-rows database view :start start :end end :limit limit))))
 
 (defmacro with-views (database views &body body)
   "Execute BODY, then incrementally update VIEWS from Tek9's change vector."
