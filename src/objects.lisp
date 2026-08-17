@@ -231,6 +231,17 @@ provided, a DB configured with :DEFAULT reads *INDEX-DEFINITIONS* at open time."
                      (transaction-mode-error-active-mode condition)
                      (db-name (transaction-mode-error-database condition))))))
 
+(define-condition transaction-database-error (error)
+  ((active-database :initarg :active-database
+                    :reader transaction-database-error-active-database)
+   (requested-database :initarg :requested-database
+                       :reader transaction-database-error-requested-database))
+  (:report (lambda (condition stream)
+             (format stream
+                     "Cannot access Tek9 database ~A inside a transaction on different database ~A. LMDB cannot provide an atomic transaction across environments."
+                     (db-name (transaction-database-error-requested-database condition))
+                     (db-name (transaction-database-error-active-database condition))))))
+
 (defvar *transaction-database* nil
   "DATABASE whose Tek9 transaction boundary is active in this dynamic extent.")
 
@@ -259,8 +270,15 @@ additional document keyspaces the caller intends to use."))
 
 Standalone operations create one LMDB transaction. When called within an
 existing Tek9 transaction for the same DATABASE, compatible work reuses that
-transaction directly instead of creating an LMDB child transaction."
+transaction directly instead of creating an LMDB child transaction. Access to a
+different DATABASE while a Tek9 transaction is active fails closed because LMDB
+cannot atomically compose transactions across environments."
   (check-type function function)
+  (when (and *transaction-database*
+             (not (eq database *transaction-database*)))
+    (error 'transaction-database-error
+           :active-database *transaction-database*
+           :requested-database database))
   (if (eq database *transaction-database*)
       (progn
         (when (and write (eq *transaction-mode* :read))
@@ -297,9 +315,15 @@ BODY participates directly in the active transaction."
 MODE is :READ or :WRITE. Fixed engine DBIs and DATABASE-NAMES are opened before
 the outer LMDB transaction begins. Nested compatible Tek9 transactions on the
 same DATABASE reuse the active boundary; callers must declare any first-use
-custom DATABASE-NAMES at the outermost boundary."
+custom DATABASE-NAMES at the outermost boundary. Nesting a different DATABASE
+fails closed rather than creating a separately committing LMDB transaction."
   (check-type function function)
   (check-type mode (member :read :write))
+  (when (and *transaction-database*
+             (not (eq database *transaction-database*)))
+    (error 'transaction-database-error
+           :active-database *transaction-database*
+           :requested-database database))
   (unless (eq database *transaction-database*)
     (prepare-transaction-dbis database :database-names database-names))
   (call-with-database-transaction database (eq mode :write) function))
