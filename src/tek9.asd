@@ -12,5 +12,6 @@
                (:file "graphs")
                (:file "views")
                (:file "query")
+               (:file "graph-lifecycle")
                (:file "tek9"))
   :in-order-to ((test-op (test-op :tek9-tests))))

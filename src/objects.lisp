@@ -35,7 +35,7 @@
                                (key-type :string)
                                unique
                                multi-valued)
-  "Create a reusable declarative secondary-index definition.
+  "Create a reusable declarative INDEX-DEFINITION.
 
 INDEX-DEFINITION objects contain Lisp extractor functions, so they are process
 configuration rather than serialized database metadata. OPEN-DATABASE reapplies
@@ -218,17 +218,132 @@ provided, a DB configured with :DEFAULT reads *INDEX-DEFINITIONS* at open time."
   (clrhash (db-indexes db))
   db)
 
-(defmacro with-database ((database &key (write nil)) &body body)
-  "Execute BODY in one LMDB transaction using DATABASE's durability profile.
+(define-condition transaction-mode-error (error)
+  ((database :initarg :database :reader transaction-mode-error-database)
+   (requested-mode :initarg :requested-mode
+                   :reader transaction-mode-error-requested-mode)
+   (active-mode :initarg :active-mode
+                :reader transaction-mode-error-active-mode))
+  (:report (lambda (condition stream)
+             (format stream
+                     "Cannot start Tek9 ~A work inside an active ~A transaction on ~A."
+                     (transaction-mode-error-requested-mode condition)
+                     (transaction-mode-error-active-mode condition)
+                     (db-name (transaction-mode-error-database condition))))))
 
-WITH-TXN commits automatically on normal return and aborts on non-local exit."
-  `(multiple-value-bind (sync meta-sync)
-       (durability-options (db-durability ,database))
-     (lmdb:with-txn (:env (db-env ,database)
-                     :write ,write
-                     :sync sync
-                     :meta-sync meta-sync)
-       ,@body)))
+(define-condition transaction-database-error (error)
+  ((active-database :initarg :active-database
+                    :reader transaction-database-error-active-database)
+   (requested-database :initarg :requested-database
+                       :reader transaction-database-error-requested-database))
+  (:report (lambda (condition stream)
+             (format stream
+                     "Cannot access Tek9 database ~A inside a transaction on different database ~A. LMDB cannot provide an atomic transaction across environments."
+                     (db-name (transaction-database-error-requested-database condition))
+                     (db-name (transaction-database-error-active-database condition))))))
+
+(defvar *transaction-database* nil
+  "DATABASE whose Tek9 transaction boundary is active in this dynamic extent.")
+
+(defvar *transaction-mode* nil
+  "Mode of the active Tek9 transaction boundary: :READ or :WRITE.")
+
+(defgeneric prepare-transaction-dbis (database &key database-names)
+  (:documentation
+   "Open DBIs required by an explicit Tek9 transaction before LMDB begins it.
+
+The LMDB wrapper forbids first-time GET-DB calls inside an active transaction.
+Methods may therefore pre-open fixed engine keyspaces. DATABASE-NAMES declares
+additional document keyspaces the caller intends to use."))
+
+(defmethod prepare-transaction-dbis ((database database) &key database-names)
+  (database-db database +main-name+
+               :key-encoding :utf-8
+               :value-encoding :octets)
+  (dolist (name database-names database)
+    (database-db database name
+                 :key-encoding :utf-8
+                 :value-encoding :octets)))
+
+(defun call-with-database-transaction (database write function)
+  "Call FUNCTION in a compatible Tek9 transaction on DATABASE.
+
+Standalone operations create one LMDB transaction. When called within an
+existing Tek9 transaction for the same DATABASE, compatible work reuses that
+transaction directly instead of creating an LMDB child transaction. Access to a
+different DATABASE while a Tek9 transaction is active fails closed because LMDB
+cannot atomically compose transactions across environments."
+  (check-type function function)
+  (when (and *transaction-database*
+             (not (eq database *transaction-database*)))
+    (error 'transaction-database-error
+           :active-database *transaction-database*
+           :requested-database database))
+  (if (eq database *transaction-database*)
+      (progn
+        (when (and write (eq *transaction-mode* :read))
+          (error 'transaction-mode-error
+                 :database database
+                 :requested-mode :write
+                 :active-mode :read))
+        (funcall function))
+      (multiple-value-bind (sync meta-sync)
+          (durability-options (db-durability database))
+        (lmdb:with-txn (:env (db-env database)
+                        :write write
+                        :sync sync
+                        :meta-sync meta-sync)
+          (let ((*transaction-database* database)
+                (*transaction-mode* (if write :write :read)))
+            (funcall function))))))
+
+(defmacro with-database ((database &key (write nil)) &body body)
+  "Execute BODY in a Tek9 transaction, reusing a compatible active boundary.
+
+On a normal standalone call this creates one LMDB transaction using DATABASE's
+durability profile. Inside an explicit Tek9 transaction for the same DATABASE,
+BODY participates directly in the active transaction."
+  (let ((database-var (gensym "DATABASE")))
+    `(let ((,database-var ,database))
+       (call-with-database-transaction
+        ,database-var ,write
+        (lambda () ,@body)))))
+
+(defun call-with-transaction (database function mode &key database-names)
+  "Call FUNCTION in one explicit Tek9 MODE transaction.
+
+MODE is :READ or :WRITE. Fixed engine DBIs and DATABASE-NAMES are opened before
+the outer LMDB transaction begins. Nested compatible Tek9 transactions on the
+same DATABASE reuse the active boundary; callers must declare any first-use
+custom DATABASE-NAMES at the outermost boundary. Nesting a different DATABASE
+fails closed rather than creating a separately committing LMDB transaction."
+  (check-type function function)
+  (check-type mode (member :read :write))
+  (when (and *transaction-database*
+             (not (eq database *transaction-database*)))
+    (error 'transaction-database-error
+           :active-database *transaction-database*
+           :requested-database database))
+  (unless (eq database *transaction-database*)
+    (prepare-transaction-dbis database :database-names database-names))
+  (call-with-database-transaction database (eq mode :write) function))
+
+(defmacro with-read-transaction ((database &key database-names) &body body)
+  "Execute BODY in one composable read transaction on DATABASE."
+  `(call-with-transaction ,database
+                          (lambda () ,@body)
+                          :read
+                          :database-names ,database-names))
+
+(defmacro with-write-transaction ((database &key database-names) &body body)
+  "Execute BODY in one composable write transaction on DATABASE.
+
+All normal Tek9 document, index, graph, and view operations on DATABASE reuse
+this transaction. Non-local exit aborts the entire boundary."
+  `(call-with-transaction ,database
+                          (lambda () ,@body)
+                          :write
+                          :database-names ,database-names))
 
 (defun %ordered-key< (left right)
   (etypecase left
@@ -255,7 +370,8 @@ into a safe optimization hint instead of blindly asserting MDB_APPEND."
   "Return environment and named-database statistics without scanning data."
   (let ((db (database-db database database-name)))
     (list :environment (lmdb:env-info (db-env database))
-          :database (lmdb:db-statistics db))))
+          :database (with-database (database)
+                      (lmdb:db-statistics db)))))
 
 (defun clear-changes (database)
   (setf (fill-pointer (db-changed database)) 0)

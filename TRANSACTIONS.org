@@ -1,0 +1,97 @@
+#+title: Tek9 Transaction and Graph Lifecycle APIs
+
+* Composable transactions
+
+Tek9 public document, index, graph, and view operations can participate in one explicit LMDB transaction through =with-write-transaction= and =with-read-transaction=.
+
+#+begin_src lisp
+(with-write-transaction (*db*)
+  (put *db* (new-document :id "person:1"
+                          :value '(:dtype "person" :name "Ada")))
+  (put-nodes *db*
+             (list (make-instance 'node :id "a")
+                   (make-instance 'node :id "b"))
+             :database-name "investigation")
+  (put-edge *db*
+            (make-instance 'edge
+                           :id "e1"
+                           :source "a"
+                           :predicate "knows"
+                           :target "b")
+            :database-name "investigation"))
+#+end_src
+
+Normal return commits the transaction. A condition or other non-local exit aborts the entire transaction, including mixed document, secondary-index, graph-row, and adjacency changes.
+
+Existing standalone public operations keep their old behavior: when there is no active Tek9 transaction they create and commit one LMDB transaction themselves.
+
+** Nested calls
+
+Compatible nested Tek9 transaction boundaries on the same =database= object reuse the active transaction instead of creating child commit boundaries.
+
+A read boundary may run inside a write boundary. A write operation or write boundary inside an active Tek9 read-only transaction signals =transaction-mode-error=.
+
+A Tek9 transaction belongs to exactly one =database= object and its LMDB environment. Attempting to access or nest a different Tek9 database while a transaction is active signals =transaction-database-error=. Tek9 deliberately fails closed rather than pretending two independently committing LMDB environments form one atomic transaction.
+
+The transaction object itself is deliberately not exposed. Consumers should not call raw =lmdb:*= functions or depend on Tek9 DBIs.
+
+** First-use named document DBs
+
+The LMDB Common Lisp wrapper does not allow a new named DBI to be opened for the first time after a transaction has begun. Tek9 pre-opens its fixed graph keyspaces and registered view keyspaces before an explicit outer transaction.
+
+If an application uses a custom document =database-name= for the first time inside an explicit transaction, declare that name on the outer boundary:
+
+#+begin_src lisp
+(with-write-transaction (*db* :database-names '("metadata" "journal"))
+  (put *db* (new-document :id "meta" :value '(:revision 2))
+       :database-name "metadata")
+  (put *db* (new-document :id "journal:2" :value '(:operation "op-2"))
+       :database-name "journal"))
+#+end_src
+
+Nested boundaries cannot retroactively open a first-use DBI. Declare first-use custom names on the outermost boundary.
+
+* Graph lifecycle
+
+Graph/v2 continues to expose logical graph names and external string IDs. Internal uint64 row IDs, mapping key formats, and LMDB DBIs remain private.
+
+** Fetch one edge
+
+#+begin_src lisp
+(fetch-edge *db* "edge-42" :database-name "investigation")
+#+end_src
+
+The returned edge preserves its external edge ID and normal =edge-source=, =edge-predicate=, and =edge-target= accessors.
+
+** Enumerate one graph namespace
+
+#+begin_src lisp
+(fetch-graph-nodes *db* "investigation")
+(fetch-graph-edges *db* "investigation")
+#+end_src
+
+Both APIs return objects sorted by external ID. Enumeration seeks directly to the logical graph namespace prefix and does not scan unrelated graph mappings.
+
+** Delete a node
+
+#+begin_src lisp
+(delete-node *db* "node-7" :database-name "investigation")
+#+end_src
+
+Deleting a node atomically removes every incident edge and all ordinary plus predicate-specific inbound/outbound adjacency for those edges. Parallel edges remain independently identified and are all removed when incident to the deleted node.
+
+The function returns NIL when the node does not exist and true after a successful deletion.
+
+** Clear one graph
+
+#+begin_src lisp
+(clear-graph *db* "investigation")
+#+end_src
+
+=CLEAR-GRAPH= atomically removes the graph namespace's node mappings, node rows, edge mappings, edge rows, and adjacency records. Other graph namespaces remain untouched even when they reuse the same external node or edge IDs.
+
+Global monotonically allocated graph row counters and predicate dictionary rows are retained. They are engine metadata, not logical membership in the cleared graph.
+
+* Durability
+
+These APIs use the database's configured durability profile. Canonical application data should use Tek9's default =:full= durability. Do not select =:nosync= merely to reduce benchmark latency.

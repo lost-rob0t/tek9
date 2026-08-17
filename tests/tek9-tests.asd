@@ -10,6 +10,8 @@
                (:file "test-documents")
                (:file "test-indexes")
                (:file "test-graphs")
+               (:file "test-transactions")
+               (:file "test-graph-lifecycle")
                (:file "test-views")
                (:file "test-persistence"))
   :perform (test-op (operation component)
