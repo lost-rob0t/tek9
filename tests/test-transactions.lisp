@@ -90,6 +90,26 @@
            (is (null (fetch db "illegal"))))
       (close-database db))))
 
+(test outer-transaction-preopens-first-use-document-databases
+  (let* ((path #P"/tmp/test-tek9-first-use-dbis/")
+         (db (setup-db path)))
+    (unwind-protect
+         (progn
+           (with-write-transaction
+               (db :database-names '("metadata" "journal"))
+             (put db (new-document :id "meta" :value '(:revision 7))
+                  :database-name "metadata")
+             (put db (new-document :id "entry" :value '(:operation "commit"))
+                  :database-name "journal"))
+           (close-database db)
+           (setf db (open-database (new-database "test" :path path)))
+           (is (= 7 (getf (fetch* db "meta" :database-name "metadata") :revision)))
+           (is (string= "commit"
+                        (getf (fetch* db "entry" :database-name "journal")
+                              :operation))))
+      (when (and db (db-is-open-p db))
+        (close-database db)))))
+
 (test edge-replacement-rolls-back-with-outer-transaction
   (let ((db (setup-db #P"/tmp/test-tek9-edge-replace-rollback/"))
         (graph-name "replace-rollback"))
