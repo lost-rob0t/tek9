@@ -25,7 +25,7 @@
            ;; Normal readers no longer reach through Tek9 into raw LMDB.
            (multiple-value-bind (value found-p)
                (view-get db view "p1")
-             (is found-p)
+             (is (not (null found-p)))
              (is (string= "Ada" value)))
            (multiple-value-bind (value found-p)
                (view-get db view "o1" :missing)
@@ -63,7 +63,7 @@
                                    :value '(:dtype "person" :name "Grace"))))
            (multiple-value-bind (value found-p)
                (view-get db view "p2")
-             (is found-p)
+             (is (not (null found-p)))
              (is (string= "Grace" value)))
            (is (zerop (length (db-changed db))))
 
