@@ -31,6 +31,8 @@ Compatible nested Tek9 transaction boundaries on the same =database= object reus
 
 A read boundary may run inside a write boundary. A write operation or write boundary inside an active Tek9 read-only transaction signals =transaction-mode-error=.
 
+A Tek9 transaction belongs to exactly one =database= object and its LMDB environment. Attempting to access or nest a different Tek9 database while a transaction is active signals =transaction-database-error=. Tek9 deliberately fails closed rather than pretending two independently committing LMDB environments form one atomic transaction.
+
 The transaction object itself is deliberately not exposed. Consumers should not call raw =lmdb:*= functions or depend on Tek9 DBIs.
 
 ** First-use named document DBs
