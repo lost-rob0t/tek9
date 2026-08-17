@@ -17,6 +17,9 @@
    :with-read-transaction :with-write-transaction :call-with-transaction
    :transaction-mode-error :transaction-mode-error-database
    :transaction-mode-error-requested-mode :transaction-mode-error-active-mode
+   :transaction-database-error
+   :transaction-database-error-active-database
+   :transaction-database-error-requested-database
    ;; declarative indexes
    :index-definition :new-index-definition :*index-definitions*
    :index-definition-name :index-definition-key-fn
