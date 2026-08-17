@@ -9,11 +9,14 @@
                 :href
                 :pophash)
   (:export
-   ;; database
+   ;; database / transaction boundary
    :database :new-database :open-database :close-database :db-is-open-p
    :db-path :db-env :db-name :db-max-size :db-max-dbs :db-max-readers
    :db-durability :db-count :db-changed :db-views :db-index-definitions
    :database-db :database-stats :map-database :with-database :clear-changes
+   :with-read-transaction :with-write-transaction :call-with-transaction
+   :transaction-mode-error :transaction-mode-error-database
+   :transaction-mode-error-requested-mode :transaction-mode-error-active-mode
    ;; declarative indexes
    :index-definition :new-index-definition :*index-definitions*
    :index-definition-name :index-definition-key-fn
@@ -34,8 +37,9 @@
    :node :node-id :node-props :node-edges :edge :edge-id :edge-source
    :edge-predicate :edge-target :edge-key :get-default-graph-db :get-graph-db
    :put-node :put-nodes :fetch-node :fetch-bulk-nodes :add-node-edge :put-edge
-   :put-edges :put-edges* :fetch-node-edge-ids :fetch-node-edges
-   :fetch-node-neighbors :delete-edge
+   :put-edges :put-edges* :fetch-edge :fetch-graph-nodes :fetch-graph-edges
+   :fetch-node-edge-ids :fetch-node-edges :fetch-node-neighbors
+   :delete-edge :delete-node :clear-graph
    ;; views
    :database-view :new-view :add-view :delete-view :clear-view :create-view-db
    :define-map :define-reduce :insert-results :apply-view
