@@ -90,6 +90,24 @@
            (is (null (fetch db "illegal"))))
       (close-database db))))
 
+(test nested-different-database-transaction-fails-closed
+  (let ((db-a (setup-db #P"/tmp/test-tek9-cross-db-a/"))
+        (db-b (setup-db #P"/tmp/test-tek9-cross-db-b/")))
+    (unwind-protect
+         (progn
+           (signals transaction-database-error
+             (with-write-transaction (db-a)
+               (put db-a (new-document :id "a" :value 1))
+               (put db-b (new-document :id "b" :value 2))))
+           (is (null (fetch db-a "a")))
+           (is (null (fetch db-b "b")))
+           (signals transaction-database-error
+             (with-read-transaction (db-a)
+               (with-read-transaction (db-b)
+                 (fetch db-b "b")))))
+      (close-database db-a)
+      (close-database db-b))))
+
 (test outer-transaction-preopens-first-use-document-databases
   (let* ((path #P"/tmp/test-tek9-first-use-dbis/")
          (db (setup-db path)))
