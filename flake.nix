@@ -55,6 +55,28 @@
 
       checks = eachSystem (system: {
         package = self.packages.${system}.tek9;
+        package-smoke =
+          let
+            pkgs = import nixpkgs { inherit system; };
+            tek9 = self.packages.${system}.tek9;
+            sbclWithTek9 = pkgs.sbcl.withPackages (_: [ tek9 ]);
+          in
+          pkgs.runCommand "tek9-package-smoke" {
+            nativeBuildInputs = [ sbclWithTek9 ];
+          } ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME" "$TMPDIR/consumer"
+            cd "$TMPDIR/consumer"
+
+            sbcl --noinform --non-interactive \
+              --eval '(require :asdf)' \
+              --eval '(asdf:load-system :tek9)' \
+              --eval '(assert (find-package :tek9))' \
+              --eval "(let ((database (tek9:open-database (tek9:new-database \"smoke\" :path #P\"$TMPDIR/database/\")))) (tek9:close-database database))"
+
+            test -f "$TMPDIR/database/data.mdb"
+            touch "$out"
+          '';
       });
     };
 }

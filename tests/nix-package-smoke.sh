@@ -9,15 +9,7 @@ cd "$repo_root"
 nix build --no-link .#tek9
 nix build --no-link .#default
 
-# A downstream consumer must be able to load :tek9 with only the package's
-# exported ASDF registry, outside the Tek9 source tree.
-consumer="$(mktemp -d)"
-trap 'rm -rf "$consumer"' EXIT
-cd "$consumer"
-
-tek9_pkg="$(nix build --no-link --print-out-paths "$repo_root#tek9")"
-CL_SOURCE_REGISTRY="$tek9_pkg//" \
-  nix shell nixpkgs#sbcl -c sbcl --non-interactive \
-    --eval '(require :asdf)' \
-    --eval '(asdf:load-system :tek9)' \
-    --eval '(assert (find-package :tek9))'
+# The flake check wraps the package in a downstream SBCL, changes to an empty
+# consumer directory, loads :tek9 from the package closure, and opens a mutable
+# LMDB database under the build directory rather than the immutable Nix store.
+nix build --no-link .#checks."$(nix eval --raw --impure --expr builtins.currentSystem)".package-smoke
