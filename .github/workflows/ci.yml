@@ -88,6 +88,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
 
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+
+      - name: Verify downstream Nix package contract
+        run: bash tests/nix-package-smoke.sh
+
       - name: Build source archive
         run: |
           VERSION="$(sed -n 's/.*:version "\([^"]*\)".*/\1/p' src/tek9.asd | head -n 1)"

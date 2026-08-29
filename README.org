@@ -34,6 +34,37 @@ Then:
 (use-package :tek9)
 #+end_src
 
+*** Nix flakes
+
+Tek9 exposes =packages.<system>.tek9= and =packages.<system>.default= for
+=x86_64-linux= and =aarch64-linux=. A downstream flake can add Tek9 to an SBCL
+closure without a developer-local checkout:
+
+#+begin_src nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    tek9.url = "github:lost-rob0t/tek9";
+    tek9.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, tek9, ... }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs { inherit system; };
+    in
+    {
+      packages.${system}.default = pkgs.sbcl.withPackages (_: [
+        tek9.packages.${system}.tek9
+      ]);
+    };
+}
+#+end_src
+
+The package propagates its Lisp dependencies and LMDB runtime library. Database
+paths remain application-owned mutable paths; they are never placed in the Nix
+store.
+
 ** Open a database
 
 The default LMDB map reserves 16 GiB of virtual address space and supports 64 named databases. The map is a capacity ceiling, not a preallocated 16 GiB data file.
