@@ -13,18 +13,21 @@
         let
           pkgs = import nixpkgs { inherit system; };
           cl = pkgs.sbcl.pkgs;
+          lmdb = cl.lmdb.overrideLispAttrs (old: {
+            nativeLibs = (old.nativeLibs or [ ]) ++ [ pkgs.lmdb.out ];
+          });
           tek9 = pkgs.sbcl.buildASDFSystem {
             pname = "tek9";
             version = "0.2.0";
             src = self;
             systems = [ "tek9" ];
-            nativeLibs = [ pkgs.lmdb ];
+            nativeLibs = [ pkgs.lmdb.out ];
             lispLibs = [
               cl.alexandria
               cl."bordeaux-threads"
               cl.serapeum
               cl.jsown
-              cl.lmdb
+              lmdb
               cl."cl-conspack"
             ];
           };
@@ -48,7 +51,7 @@
               lmdb
             ];
             shellHook = ''
-              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.lmdb pkgs.openssl ]}:''${LD_LIBRARY_PATH:-}
+              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.lmdb.out pkgs.openssl ]}:''${LD_LIBRARY_PATH:-}
             '';
           };
         });
