@@ -45,6 +45,7 @@
    :delete-edge :delete-node :clear-graph
    ;; views
    :database-view :new-view :add-view :delete-view :clear-view :create-view-db
+   :view-source-database-name
    :define-map :define-reduce :insert-results :apply-view
    :apply-view-to-database :with-views
    :view-get :view-rows :map-view :reduce-view

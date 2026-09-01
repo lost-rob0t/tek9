@@ -86,3 +86,49 @@
            (signals view-reducer-missing
              (reduce-view db view)))
       (close-database db))))
+
+(test view-selects-named-source-database
+  (let ((db (setup-db #P"/tmp/test-tek9-view-named-source/")))
+    (unwind-protect
+         (let ((view (new-view "outbox-by-state"
+                               nil
+                               nil
+                               :source-database-name "outbox")))
+           (define-map view
+             (emit (doc-id doc) (getf (doc-value doc) :state)))
+           (add-view db view)
+
+           ;; The source fixtures exist only in OUTBOX, never in the primary DB.
+           (put db
+                (new-document :id "job-1" :value '(:state :pending))
+                :database-name "outbox")
+           (put db
+                (new-document :id "job-2" :value '(:state :sent))
+                :database-name "outbox")
+           (apply-view-to-database db view)
+           (is (equal '(("job-1" . :pending) ("job-2" . :sent))
+                      (view-rows db view)))
+
+           ;; Incremental application must read the same declared named source.
+           (put db
+                (new-document :id "job-3" :value '(:state :failed))
+                :database-name "outbox")
+           (apply-view db view '("job-3"))
+           (is (equal '(("job-1" . :pending)
+                        ("job-2" . :sent)
+                        ("job-3" . :failed))
+                      (view-rows db view))))
+      (close-database db))))
+
+(test view-unknown-source-database-fails-closed
+  (let ((db (setup-db #P"/tmp/test-tek9-view-missing-source/")))
+    (unwind-protect
+         (let ((view (new-view "missing-source"
+                               nil
+                               nil
+                               :source-database-name "does-not-exist")))
+           (define-map view
+             (emit (doc-id doc) (doc-value doc)))
+           (signals error
+             (apply-view-to-database db view)))
+      (close-database db))))

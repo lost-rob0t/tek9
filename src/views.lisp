@@ -20,17 +20,29 @@
 (defclass database-view ()
   ((name :initform "" :type string :accessor view-name :initarg :name)
    (map-fn :initform nil :accessor view-map :initarg :map)
-   (reduce-fn :initform nil :accessor view-reduce :initarg :reduce)))
+   (reduce-fn :initform nil :accessor view-reduce :initarg :reduce)
+   (source-database-name :initform +main-name+
+                         :type string
+                         :reader view-source-database-name
+                         :initarg :source-database-name)))
 
 (defmethod add-view ((db database) (view database-view))
   (setf (gethash (view-name view) (db-views db)) view)
   view)
 
-(defun new-view (name map-fn &optional reduce-fn)
+(defun new-view (name map-fn &optional reduce-fn
+                 &key (source-database-name +main-name+))
+  "Create a materialized view over SOURCE-DATABASE-NAME.
+
+Existing callers that omit SOURCE-DATABASE-NAME continue to map Tek9's primary
+document database. The source selection affects both full rebuild and
+incremental application; materialized rows remain stored under VIEW/<NAME>."
+  (check-type source-database-name string)
   (make-instance 'database-view
                  :map map-fn
                  :reduce reduce-fn
-                 :name name))
+                 :name name
+                 :source-database-name source-database-name))
 
 (defmacro define-map (view &body body)
   "Install a mapper on VIEW while binding caller-visible DOC and EMIT symbols.
@@ -80,6 +92,14 @@ symbols present in BODY so normal exported-macro use works across packages."
                :key-encoding :utf-8
                :value-encoding :octets))
 
+(defun view-source-db (database view)
+  "Return VIEW's existing source DBI without silently creating a missing source."
+  (database-db database
+               (view-source-database-name view)
+               :if-does-not-exist :error
+               :key-encoding :utf-8
+               :value-encoding :octets))
+
 (defun clear-view (database view)
   (let ((db (create-view-db database view))
         (keys nil))
@@ -108,8 +128,8 @@ The named LMDB DBI is retained because closing/deleting open DBIs is unsafe."
     results))
 
 (defun apply-view-to-database (database view)
-  "Rebuild VIEW in a single write transaction."
-  (let ((source (%main-db database +main-name+))
+  "Rebuild VIEW from its declared source database in a single write transaction."
+  (let ((source (view-source-db database view))
         (target (create-view-db database view))
         (keys nil))
     (with-database (database :write t)
@@ -132,8 +152,8 @@ The named LMDB DBI is retained because closing/deleting open DBIs is unsafe."
     view))
 
 (defun apply-view (database view doc-ids)
-  "Incrementally apply VIEW to DOC-IDS in one write transaction."
-  (let ((source (%main-db database +main-name+))
+  "Incrementally apply VIEW to DOC-IDS from its declared source database."
+  (let ((source (view-source-db database view))
         (target (create-view-db database view)))
     (with-database (database :write t)
       (dolist (id doc-ids)
