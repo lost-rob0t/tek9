@@ -24,6 +24,32 @@
            (is (= 2 (length (index-document-ids db "dtype" "organization")))))
       (close-database db))))
 
+(test secondary-index-range-duplicates
+  (let ((db (setup-db #P"/tmp/test-tek9-index-range-duplicates/")))
+    (unwind-protect
+         (progn
+           (register-index db
+                           "tag"
+                           (lambda (document)
+                             (getf (doc-value document) :tag)))
+           (put-bulk db
+                     (list (new-document :id "a1" :value '(:tag "a" :n 1))
+                           (new-document :id "a2" :value '(:tag "a" :n 2))
+                           (new-document :id "b1" :value '(:tag "b" :n 3))))
+           ;; A non-unique index is DUPSORT. The bounded range primitive must
+           ;; enumerate duplicate postings rather than silently skipping them.
+           (is (equal '((:tag "a" :n 1) (:tag "a" :n 2))
+                      (select-index-range db "tag" "a" :end "a")))
+           (is (= 1 (length
+                     (select-index-range db "tag" "a" :end "a" :limit 1))))
+           (is (= 2 (length
+                     (select-index-range db "tag" "a" :end "a" :limit 2))))
+           (is (equal '((:tag "a" :n 1)
+                        (:tag "a" :n 2)
+                        (:tag "b" :n 3))
+                      (select-index-range db "tag" "a" :end "b"))))
+      (close-database db))))
+
 (test fast-index-rebuild
   (let ((db (setup-db #P"/tmp/test-tek9-fast-index/")))
     (unwind-protect
