@@ -119,3 +119,16 @@
                         ("job-3" . :failed))
                       (view-rows db view))))
       (close-database db))))
+
+(test view-unknown-source-database-fails-closed
+  (let ((db (setup-db #P"/tmp/test-tek9-view-missing-source/")))
+    (unwind-protect
+         (let ((view (new-view "missing-source"
+                               nil
+                               nil
+                               :source-database-name "does-not-exist")))
+           (define-map view
+             (emit (doc-id doc) (doc-value doc)))
+           (signals error
+             (apply-view-to-database db view)))
+      (close-database db))))
