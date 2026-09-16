@@ -1,0 +1,314 @@
+#+title: Tek9 to CouchDB synchronization design
+#+date: 2026-09-15
+#+options: toc:2 num:nil
+
+* Decision and implementation status
+
+PROPOSED, NOT IMPLEMENTED. Target source snapshot:
+=1cb978084da8b4f1d184b3ef2a1d30057f525608=.
+
+Keep Tek9 authoritative for local commits. CouchDB is an optional remote exchange
+and recovery endpoint, not a prerequisite for an ordinary local write. Start
+with push-only, single-authority synchronization. Add inbound/offline multi-peer
+work only after replay, conflict and bootstrap tests pass.
+
+The recommended first protocol is *application-level commit-envelope sync*:
+one bounded immutable CouchDB document represents one committed Tek9 mutation
+set. This is not native CouchDB/PouchDB replication. A simple document mirror
+would be smaller, but would expose partial document/graph transactions remotely.
+
+CouchDB's [[https://docs.couchdb.org/en/stable/api/database/bulk-api.html][bulk API]] is not atomic across documents and reports individual failures.
+Its [[https://docs.couchdb.org/en/stable/api/database/changes.html][changes feed]] guarantees the latest change per document, not every intermediate
+revision. Immutable commit documents avoid relying on that feed as historical
+storage for repeatedly overwritten entity snapshots. These are protocol choices,
+not existing Tek9 guarantees.
+
+* Scope and boundaries
+
+Synchronize logical document mutations in explicitly selected named keyspaces,
+and graph node/edge mutations using external IDs and logical graph names.
+Indexes, materialized views, physical uint64 row IDs, LMDB DBIs, caches, functions
+and live Lisp objects are not transmitted. Recipients rebuild derived structures.
+
+Proposed ASDF separation, names not yet exported or implemented:
+
+| Layer | Responsibility |
+|-------+----------------|
+| tek9 | Local storage and composable transactions |
+| tek9/change-journal | Generic committed logical changes, revisions and provenance |
+| tek9/couchdb-sync | HTTP protocol, peer configuration, codec and synchronization |
+| tek9/couchdb-sync/sento | Optional actor orchestration around the adapter |
+
+Do not put StarIntel actor discovery, a registry, RabbitMQ routing, application
+schemas or Quasar-specific behavior into Tek9. Reuse the application's existing
+storage owner rather than opening another competing writer for the same path.
+Ordinary CouchDB entity documents from unrelated applications require an explicit
+import mapping; they are not automatically compatible with this envelope schema.
+
+* Prerequisite integrity work
+
+Fix #18 (duplicate graph IDs), #19 (caught transaction failures), #21 (committed
+change tracking), #24/#25/#29 (index identity/configuration), and #26 (predicate
+identity) before promising safe synchronization. #20/#22 govern derived-view
+correctness; use explicit rebuilds until resolved. #27/#28/#32 concern resource
+bounds and must inform journal/export implementation. Existing map-growth work
+is #10/#12: do not create a second resizing/retry mechanism in the sync adapter.
+
+A network adapter cannot repair an inconsistent local commit. Public mutation
+entry points must all participate in journal capture when a keyspace is enrolled,
+including bulk writes, graph replacement, node cascades and namespace clearing.
+Untracked low-level/raw LMDB mutations are outside the sync contract and must be
+prevented by the application's ownership boundary.
+
+* Local transaction and durable journal
+
+Within the same outer LMDB write transaction:
+
+1. Check that the operation is allowed, its values can be encoded, and its
+   synchronized write-set fits configured operation/byte limits.
+2. Apply documents, graph topology and secondary indexes through Tek9.
+3. Allocate an origin-local sequence and store logical record versions,
+   tombstones, the complete immutable envelope and outbox eligibility.
+4. Commit all of it, or none of it.
+
+Enforce the final size bound before commit; crossing it aborts the entire local
+transaction. Do not split an already-defined atomic mutation merely to fit a
+network batch. No HTTP request, remote acknowledgement or externally visible
+mailbox side effect occurs inside this boundary. A post-commit wakeup is only an
+optimization; scanning the durable outbox must recover lost wakeups.
+
+Record identity is =(kind, logical-namespace, external-id)= with an unambiguous
+versioned encoding, not slash concatenation. Each mutation carries its prior
+logical version and resulting content/deletion. Multiple writes to one record
+in a transaction are normalized to a documented final-state operation retaining
+the original precondition. Preserve graph dependency semantics when normalizing.
+
+Logical revisions refer to origin commit IDs plus operation identity; they are
+not CouchDB =_rev= values. Application invariants involving records only read by
+a transaction require captured read preconditions or explicit deterministic
+validators. Local atomicity does not imply globally serializable offline writes.
+
+* Wire schema and value codec
+
+Example structure, with illustrative identity/digest values:
+
+#+begin_src json
+{
+  "_id": "t9c:replica-uuid:00000000000000000042",
+  "type": "tek9.commit",
+  "schema_version": 1,
+  "store_id": "workspace-uuid",
+  "origin": "replica-uuid",
+  "origin_sequence": "42",
+  "previous_origin_commit": "t9c:replica-uuid:00000000000000000041",
+  "operations": [
+    {"op": "document.put", "namespace": "std", "id": "person:ada",
+     "base_version": null, "value": {"type": "person", "name": "Ada"}},
+    {"op": "node.put", "namespace": "people", "id": "ada",
+     "base_version": null, "props": {"name": "Ada"}}
+  ],
+  "content_digest": "sha256:canonical-envelope-digest"
+}
+#+end_src
+
+Persist a replica UUID generated from a suitable OS-random UUID implementation.
+Do not treat Tek9's existing time/random key generator as a distributed identity
+proof. Never reuse an origin/sequence pair after restoring a snapshot: preserve
+its durable high-water mark or provision a new replica identity for a fork.
+
+The codec is explicit and versioned. Define UTF-8 strings, string-keyed JSON
+objects, arrays, distinct null/false, finite numeric handling, and tagged decimal
+strings for integers outside the chosen interoperable numeric range. Reject
+unsupported values before commit. Application Lisp plists/CLOS objects need
+registered, trusted codecs; do not infer arbitrary classes from network data.
+Never call READ, EVAL, or unrestricted Conspack decoding on received payloads.
+
+Canonicalization rules, Unicode treatment, numeric representation and the fields
+excluded from the digest must be frozen by cross-language fixture tests. Exclude
+CouchDB-managed =_rev= and the digest field itself. A digest detects identity
+mismatches; it is not authentication. Credentials and access control remain
+separate requirements.
+
+* Actor and transport design
+
+Use [[https://mdbergmann.github.io/cl-gserver/index.html][Sento]] in the optional adapter. A storage-owner actor processes local database
+commands; a per-peer coordinator manages synchronization state; a bounded pool
+of HTTP workers handles network I/O. Use a dedicated/pinned storage dispatcher
+when required by the integration. Each transaction starts and finishes in one
+handler; neither DBIs nor transaction/cursor objects are actor messages.
+
+[[https://github.com/fukamachi/dexador][Dexador]] is a candidate blocking HTTP backend in the worker pool, not in the
+storage actor. Keep the transport behind an interface so an asynchronous backend
+can be added without changing journal semantics. Pin and test actual library
+versions before implementation. Do not hand-roll an actor scheduler.
+
+Messages are immutable data such as =scan-outbox=, =send-batch=,
+=acknowledge-envelope=, =receive-batch=, =apply-envelope= and =peer-status=.
+Durable records, not mailbox contents or Sento event-stream delivery, determine
+what remains to be done. Bound mailbox admission and in-flight bytes explicitly;
+using an actor library alone does not make queues bounded or delivery durable.
+
+Example proposed configuration data, not a callable API:
+
+#+begin_src lisp
+'(:peer-id "home-couch"
+  :endpoint "https://couch.example.invalid/tek9-commits"
+  :credential-provider :application-secret-store
+  :mode :push
+  :document-keyspaces ("std" "outbox")
+  :graphs ("people")
+  :conflict-policy :manual
+  :max-envelope-bytes 1048576
+  :max-operations 1000
+  :max-batch-bytes 4194304
+  :max-in-flight-batches 2)
+#+end_src
+
+Limits above are initial design defaults, not measured recommendations; validate
+against deployment limits. Include connection/read deadlines, retry budgets,
+maximum nesting/decompressed response size, and a disk-quota/backpressure policy.
+
+* Push: exact envelopes, per-result acknowledgements
+
+Read a bounded outbox batch and copy its immutable payloads, then close the read
+transaction. POST them to =/{db}/_bulk_docs= using normal =new_edits=true=.
+Inspect every returned row; a successful HTTP request is not proof that all its
+documents were stored. Acknowledge successful envelopes in a short local write
+transaction. Later successes must not erase earlier failed sequence entries.
+
+If the response is lost after remote commit, retry the same IDs. On conflict,
+fetch the existing envelope and compare its canonical content. Exact equality
+is an idempotent acknowledgement; different content for the same immutable ID is
+a quarantined integrity conflict, never an overwrite. When CouchDB itself has
+replicated conflicting leaves, inspect the relevant leaves rather than trusting
+one winning revision. Do not use =new_edits=false= to bypass conflicts.
+
+Provision server-side validation that prohibits mutation/deletion of committed
+envelope content by ordinary sync writers. Keep administrative repair separate.
+For expiry/restart recovery, persist any claimed in-flight lease and fencing
+generation; stale acknowledgements cannot consume another generation's work.
+Use bounded backoff with jitter. Auth failures pause the peer and retain work;
+rate limits and transient failures retry within an explicit policy.
+
+* Pull, causal ordering and conflicts
+
+Pull bounded =_changes= pages or longpoll responses. Keep =last_seq= as the exact
+opaque JSON token; never increment it or assume it is an integer. Store received
+envelopes and the received checkpoint atomically. A malformed/truncated response
+must not advance beyond safely retained data. Invalid records require a durable
+quarantine decision, not silent skipping.
+
+Applying an envelope is a separate all-or-nothing Tek9 transaction: validate its
+schema, origin, digest, declared namespaces, prior versions, dependencies and
+application constraints; apply through public mutation APIs; then record the
+seen commit ID and applied status atomically. Missing causal predecessors remain
+pending. A stale base or conflicting local edit quarantines the whole envelope;
+it must not apply only the easy subset of its operations.
+
+Default resolution is manual. Retain both proposals and record the conflict.
+A resolution creates a new explicit commit referencing the competing versions.
+Do not use wall-clock last-write-wins to hide lost data. Delete-versus-edit is
+also a conflict. Derived indexes/views do not decide the winner.
+
+Separate =received checkpoint= from =applied progress=. Quarantined or dependency-
+blocked envelopes can be durably received without being applied. Status must
+expose that distinction and the oldest blocked commit. For multiple origins,
+progress is per-origin dependency state, not one fabricated sortable sequence.
+
+Suppress echo by retaining the original origin/commit identity on imported
+mutations. Replaying an already-seen commit is a no-op. Forwarding an original
+envelope to another configured peer is allowed by policy; minting a new local
+commit for every received envelope creates a replication loop and is forbidden.
+
+* Graphs, deletes and derived data
+
+Apply node creation before dependent edge creation; remove dependent edges before
+node deletion where needed. Preserve stable external edge IDs on replacement.
+Node deletion/graph clearing must journal the complete logical effect in the same
+transaction, with a bounded operation set or an explicitly versioned semantic
+operation validated at the receiver. V1 should expand small cascades and reject
+oversized synchronized transactions rather than invent partial graph commits.
+
+A logical deletion is a tombstone operation in an immutable commit, not deletion
+of the event document from CouchDB. Retain tombstones and events until all active
+peers can recover through acknowledged history or a complete snapshot. Retiring
+a peer and expiring its history requires an explicit new-bootstrap policy.
+Do not purge merely because the current source document is absent.
+
+Remote entity-by-ID or search projections may be built from applied envelopes,
+but are derived and may lag. They are not the recovery authority and must not
+be mistaken for an atomic multi-document CouchDB view of each Tek9 transaction.
+
+* Bootstrap, checkpoints and garbage collection
+
+V1 bootstrap is intentionally conservative: capture a new generation while the
+storage owner quiesces canonical writes. Record the journal high-water mark,
+export bounded pages containing records, logical versions and required
+tombstones, and seal a manifest with page counts and digests. Internal snapshot
+storage does not generate application mutation events. Enforce a timeout and
+restart an interrupted unsealed generation; do not resume from an inconsistent
+mixture of snapshots. Release the writer gate only after sealing; subsequent
+journal entries bridge the snapshot boundary.
+
+Upload pages and then the manifest. The receiver stages and validates every page
+before activating a fresh store. Initial bootstrap targets a new/offline local
+environment; do not overwrite an active existing store a page at a time. A live
+resync/snapshot swap is a separate reviewed lifecycle feature. Bound memory with
+page streaming and disk with quota checks. Large continuous online snapshots can
+be added later with a tested snapshot/writer coordination design.
+
+Checkpoint identity includes store ID, peer database identity/epoch, selected
+namespaces, direction and schema/codec fingerprint. Provision and verify an
+explicit remote epoch marker; do not rely on a URL or legacy server-start field
+alone to identify a recreated database. A mismatch requires reconciliation or
+bootstrap, not blind reuse of the old sequence token. Never put secrets into a
+checkpoint key or diagnostic log.
+
+GC requires a complete recoverable snapshot plus per-peer acknowledgement rules.
+A peer must not silently fall behind retained history. Keep restore/fork tests
+for origin-ID uniqueness and never recycle event IDs.
+
+* Security and operational status
+
+Use verified TLS, application-provided secrets, endpoint allowlisting and least-
+privilege CouchDB credentials. Namespace selection is not an authorization
+boundary: enforce trusted store/tenant isolation and authorized writes on both
+sides. Do not log credentials or entire stored payloads on errors. Rate-limit
+malformed senders and bound parse depth, sizes and retry work.
+
+Expose peer state, pending/claimed/acked envelope counts and bytes, retry attempts,
+received checkpoint, per-origin applied progress, blocked/quarantined counts,
+last successful exchange, and redacted last error. A successful remote upload is
+not proof another Tek9 peer has applied the commit. A health check is not a claim
+of convergence while unresolved conflicts remain.
+
+* Delivery slices and gates
+
+| Slice | Deliverable | Required RED-first proof |
+|-------+-------------+--------------------------|
+| 0 | Local integrity fixes | #18/#19 graph/index consistency and rollback |
+| 1 | Generic journal and wire codec | all-or-none capture; types; bounds; reopen |
+| 2 | Push-only Sento/Dexador adapter | offline restart; lost response; mixed bulk results |
+| 3 | Inbox, dedup and manual conflict handling | replay; causal gaps; edit/edit and delete/edit |
+| 4 | Fresh-store bootstrap and retention | interrupted pages; manifest; remote epoch change |
+| 5 | Operational hardening | quotas; authentication; stale leases; crash matrix |
+
+Use a disposable real CouchDB integration service in addition to a deterministic
+fault-injection HTTP transport. Test crashes before/after local commit, after
+remote commit before acknowledgement, and during checkpoint persistence. Test
+map-full, duplicate delivery, out-of-order origins, missing parent commits,
+conflicting immutable IDs, graph atomicity, oversized payloads, invalid UTF-8,
+NIL/null/false/array distinctions and integers beyond JavaScript's exact range.
+A local-only application must still load and operate with the adapter disabled.
+
+* Native CouchDB replication is a separate choice
+
+Full compatibility requires implementing the [[https://docs.couchdb.org/en/stable/replication/protocol.html][CouchDB replication protocol]], including
+revision ancestry/leaf handling, revision differences, replication checkpoints
+and revision-preserving writes. =_revs_diff=, =_revisions= and =new_edits=false=
+are not shortcuts for uploading arbitrary new Tek9 values. Do not advertise
+native CouchDB/PouchDB replication until those semantics have integration tests.
+
+For this plan, ordinary HTTP storage of immutable application envelopes is the
+smaller honest contract. No remote service has been configured or contacted with
+user credentials, and no synchronization implementation is included in this PR.

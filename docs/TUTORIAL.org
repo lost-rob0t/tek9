@@ -1,0 +1,79 @@
+#+title: A small Tek9 tutorial
+#+date: 2026-09-15
+#+options: toc:nil num:nil
+
+* What this demonstrates
+
+Create an embedded store, atomically persist documents plus a graph and metadata,
+query a secondary index, roll back an operation, materialize a view, and reopen
+the store using a fresh Lisp handle. The complete source is
+[[file:../examples/tutorial.lisp][examples/tutorial.lisp]]. It uses public Tek9 symbols only.
+
+The source has assertions but has not been executed in the audit environment:
+SBCL and LMDB were unavailable. Run it locally before treating it as verified.
+This tutorial does not implement CouchDB sync or fix the audited storage bugs.
+
+* Run from a checkout
+
+With Quicklisp already installed:
+
+#+begin_src shell
+sbcl --noinform --non-interactive \
+  --load "$HOME/quicklisp/setup.lisp" \
+  --eval '(asdf:load-asd (truename "src/tek9.asd"))' \
+  --eval '(ql:quickload :tek9)' \
+  --load examples/tutorial.lisp \
+  --eval '(tek9-tutorial:run-tutorial :path #P"/tmp/tek9-tutorial-fresh/")'
+#+end_src
+
+On NixOS, run this inside =nix develop= when using the Quicklisp route. At a
+SLIME/SLY REPL, after loading Tek9, the final two forms suffice:
+
+#+begin_src lisp
+(load "examples/tutorial.lisp")
+(tek9-tutorial:run-tutorial :path #P"/tmp/tek9-tutorial-fresh/")
+#+end_src
+
+Choose a new directory name on a second run. The example does not delete old
+data. A successful run prints =Tek9 tutorial passed.= and returns the retained
+database pathname and these materialized rows:
+
+#+begin_example
+(("person:ada" . "Ada Lovelace") ("person:grace" . "Grace"))
+#+end_example
+
+* Follow the source
+
+=write-example-data= uses one public write boundary. The primary document
+keyspace contains two people; =metadata= contains a schema version; logical
+graph =people= contains two nodes and one edge. The edge uses a stable string ID
+and string predicate. Document keyspaces and logical graph namespaces are not
+the same concept, even though their APIs both use =:database-name=.
+
+=verify-example-data= checks values, index IDs, an inclusive primary-key range,
+metadata and graph traversal in one read boundary.
+
+=demonstrate-rollback= raises a dedicated condition and catches it outside the
+write boundary. Catching a failed mutation inside that boundary is unsafe in the
+audited revision (#19). The aborted record must not exist afterward.
+
+=demonstrate-view= emits unique document IDs, counts rows, changes a name, and
+rebuilds the view inside the same transaction as that change. Full rebuilding is
+intentional: the current incremental path does not retract old emissions.
+
+=run-tutorial= closes and creates a new database handle with the same index
+configuration, then checks persistence. Index extractor functions are
+configuration; they are not magically recovered from stored postings.
+
+* Complete Lisp source
+
+This Org include displays the checked-in Lisp file when exported, avoiding a
+second independently edited copy. Edit the Lisp file to modify the example.
+
+#+include: "../examples/tutorial.lisp" src lisp
+
+* Next reading
+
+[[file:USAGE.org][Usage and API contracts]] explain named sources, bulk writes, durability, range
+conventions and known limits. [[file:COUCHDB-SYNC.org][The sync design]] explains why the legacy dirty
+vector is not a replication journal. [[file:AUDIT-2026-09-15.org][The audit]] links every filed finding.

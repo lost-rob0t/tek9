@@ -1,0 +1,18 @@
+#+title: Tek9 documentation
+#+options: toc:nil num:nil
+
+* Start here
+
+[[file:docs/USAGE.org][Usage guide]] — loading, lifecycle, documents, indexes, transactions, graphs,
+views and the current API's limits.
+
+[[file:docs/TUTORIAL.org][Small Org tutorial]] — run and understand the accompanying
+[[file:examples/tutorial.lisp][Common Lisp example]]. It creates a fresh store and checks persistence.
+
+[[file:docs/AUDIT-2026-09-15.org][Source audit]] — pinned baseline, all 18 issues, triage and verification limits.
+
+[[file:docs/COUCHDB-SYNC.org][CouchDB synchronization plan]] — proposed only; Tek9 stays authoritative locally,
+with durable journal capture and an optional Sento-driven HTTP adapter.
+
+The audit/example have not been runtime-tested in the authoring environment.
+See the usage guide for the exact local validation commands.
