@@ -1,12 +1,12 @@
 (in-package :star-git)
 
-(defconstant +objects-db+ "star-git/objects")
-(defconstant +commits-db+ "star-git/commits")
-(defconstant +refs-db+ "star-git/refs")
+(defparameter +objects-db+ "star-git/objects")
+(defparameter +commits-db+ "star-git/commits")
+(defparameter +refs-db+ "star-git/refs")
 
-(defconstant +by-document-index+ "star-git/by-document")
-(defconstant +by-dataset-day-index+ "star-git/by-dataset-day")
-(defconstant +by-content-index+ "star-git/by-content-hash")
+(defparameter +by-document-index+ "star-git/by-document")
+(defparameter +by-dataset-day-index+ "star-git/by-dataset-day")
+(defparameter +by-content-index+ "star-git/by-content-hash")
 
 (defclass repository ()
   ((database :initarg :database :reader repository-database)
