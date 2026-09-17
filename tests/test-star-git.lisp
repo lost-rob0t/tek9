@@ -174,7 +174,7 @@
                    (is (= 1 (length locations)))
                    (is (string= pack-id-a
                                 (getf (first locations) :pack-id))))
-                 (is (null (star-git:fsck restored))))))))
+                 (is (null (star-git:fsck restored)))))))
       (star-git:close-repository source)
       (star-git:close-repository restored))))
 
