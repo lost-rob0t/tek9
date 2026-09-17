@@ -138,7 +138,7 @@ different content is rejected rather than overwritten."
            (%custody-error
             "receipt id ~S already exists with different immutable content"
             receipt-id))))
-    receipt))
+      receipt)))
 
 (defun read-custody-receipt (repository receipt-id)
   "Return one custody receipt by id, or NIL."
