@@ -185,7 +185,6 @@
                  :codec +pack-codec+
                  :object-count object-count
                  :byte-length byte-length)))
-    ;; Open fixed DBIs before the outer LMDB transaction.
     (%packs-db repository)
     (%pack-index-db repository)
     (with-write-transaction
@@ -363,7 +362,7 @@ pack bytes and is independent from the source pathname."
                                       dtype
                                       mutation
                                       (parse-integer accepted-at-string
-                                                     :junk-allowed nil))))))))))))))
+                                                     :junk-allowed nil)))))))))))))
 
 (defun %install-imported-commit (repository commit-id preimage pathname)
   (let* ((database (repository-database repository))
