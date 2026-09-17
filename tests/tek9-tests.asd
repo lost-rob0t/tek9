@@ -1,10 +1,10 @@
 (asdf:defsystem :tek9-tests
-  :description "Tests for Tek9"
+  :description "Tests for Tek9 and star-git"
   :author "nsaspy"
   :license "MIT"
   :version "0.2.0"
   :serial t
-  :depends-on (#:tek9 #:fiveam)
+  :depends-on (#:tek9 #:star-git #:fiveam)
   :components ((:file "package")
                (:file "create-db")
                (:file "test-documents")
@@ -13,7 +13,8 @@
                (:file "test-transactions")
                (:file "test-graph-lifecycle")
                (:file "test-views")
-               (:file "test-persistence"))
+               (:file "test-persistence")
+               (:file "test-star-git"))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (let ((results (uiop:symbol-call :fiveam :run :tek9-tests)))
