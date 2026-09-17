@@ -2,7 +2,10 @@
 
 (defparameter +packs-db+ "star-git/packs")
 (defparameter +pack-index-db+ "star-git/pack-index")
-(defparameter +pack-magic+ #(83 71 80 75)) ; SGPK
+(defparameter +pack-magic+
+  (make-array 4
+              :element-type '(unsigned-byte 8)
+              :initial-contents '(83 71 80 75))) ; SGPK
 (defconstant +pack-format-version+ 1)
 (defparameter +pack-codec+ "lzma")
 (defparameter +default-max-pack-objects+ 10000000)
