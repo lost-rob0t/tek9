@@ -5,6 +5,8 @@
   :version "0.1.0"
   :pathname "star-git"
   :serial t
-  :depends-on (#:tek9 #:ironclad #:babel)
+  :depends-on (#:tek9 #:ironclad #:babel #:cffi)
   :components ((:file "package")
-               (:file "repository")))
+               (:file "repository")
+               (:file "compression")
+               (:file "packs")))
