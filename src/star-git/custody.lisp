@@ -397,6 +397,11 @@ metadata, local pack presence and custody metadata. With DEEP true it also
 rehashes each present local pack and compares its typed star-git pack id.
 Verified remote receipts make evicted object payloads available for reachability,
 but remote bytes are never downloaded by this embedded check."
+  ;; Tek9/LMDB forbids first-time named DBI opens inside an active transaction.
+  ;; Pre-open all cold-placement DBIs before FSCK begins any read snapshot so
+  ;; repositories with no prior packs/custody records are valid empty inputs.
+  (%packs-db repository)
+  (%pack-index-db repository)
   (%custody-db repository)
   (%ensure-custody-index repository)
   (let ((problems nil))
