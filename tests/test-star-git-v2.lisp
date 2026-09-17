@@ -107,7 +107,8 @@
                          repository "doc-material" blob-id
                          (append base-args
                                  (list :provenance
-                                       (star-git-v2-provenance)))))
+                                       (star-git-v2-provenance
+                                        :couch-rev "2-base")))))
                 (different-rev
                   (apply #'star-git:commit-document
                          repository "doc-material" blob-id
@@ -121,6 +122,7 @@
                          (append base-args
                                  (list :provenance
                                        (star-git-v2-provenance
+                                        :couch-rev "4-generation"
                                         :refresh-generation 5)))))
                 (different-policy
                   (apply #'star-git:commit-document
@@ -128,6 +130,7 @@
                          (append base-args
                                  (list :provenance
                                        (star-git-v2-provenance
+                                        :couch-rev "5-policy"
                                         :policy-digest "sha256:other"))))))
            (is (not (string= base different-rev)))
            (is (not (string= base different-generation)))
