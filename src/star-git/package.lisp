@@ -31,6 +31,11 @@
    :log-document
    :inventory-commits
    :commits-for-blob
+   :build-pack
+   :import-pack
+   :pack-id-for-path
+   :read-pack-metadata
+   :pack-locations
    :fsck
    :ref-conflict
    :ref-conflict-ref
@@ -39,4 +44,12 @@
    :missing-object
    :missing-object-id
    :object-integrity-error
-   :object-integrity-error-id))
+   :object-integrity-error-id
+   :lzma-codec-error
+   :lzma-codec-error-phase
+   :lzma-codec-error-code
+   :pack-error
+   :pack-error-pathname
+   :pack-error-reason
+   :pack-integrity-error
+   :pack-integrity-object-id))
