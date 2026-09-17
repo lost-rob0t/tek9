@@ -25,6 +25,10 @@
    :read-blob
    :commit-document
    :read-commit
+   :commit-format-version
+   :commit-provenance
+   :normalize-commit-provenance
+   :find-commit-by-couch-rev
    :document-ref-name
    :resolve-ref
    :update-ref
@@ -57,6 +61,9 @@
    :missing-object-id
    :object-integrity-error
    :object-integrity-error-id
+   :invalid-provenance
+   :invalid-provenance-key
+   :invalid-provenance-reason
    :duplicate-tree-ref
    :duplicate-tree-ref-ref
    :missing-tree-entry
