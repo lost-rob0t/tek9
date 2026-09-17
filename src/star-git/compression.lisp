@@ -114,4 +114,4 @@ under this format version produces equal compressed bytes."
                   (error 'lzma-codec-error :phase :size-mismatch :code code))
                 (if (zerop expected-size)
                     (make-array 0 :element-type '(unsigned-byte 8))
-                    (subseq output 0 expected-size)))))))))))
+                    (subseq output 0 expected-size))))))))))
