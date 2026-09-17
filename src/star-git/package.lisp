@@ -31,12 +31,24 @@
    :log-document
    :inventory-commits
    :commits-for-blob
+   ;; immutable snapshot trees / tags
+   :write-tree
+   :read-tree
+   :dataset-snapshot-ref-name
+   :snapshot-dataset-day
+   :update-object-ref
+   :restore-ref-from-tree
+   :tag-ref-name
+   :write-tag
+   :read-tag
+   ;; packs
    :build-pack
    :import-pack
    :pack-id-for-path
    :read-pack-metadata
    :pack-locations
    :fsck
+   ;; conditions
    :ref-conflict
    :ref-conflict-ref
    :ref-conflict-expected
@@ -45,6 +57,14 @@
    :missing-object-id
    :object-integrity-error
    :object-integrity-error-id
+   :duplicate-tree-ref
+   :duplicate-tree-ref-ref
+   :missing-tree-entry
+   :missing-tree-entry-tree-id
+   :missing-tree-entry-ref
+   :snapshot-format-error
+   :snapshot-format-error-object-id
+   :snapshot-format-error-reason
    :lzma-codec-error
    :lzma-codec-error-phase
    :lzma-codec-error-code
