@@ -193,6 +193,7 @@
            (uiop:copy-file pack corrupt)
            (with-open-file (stream corrupt
                                    :direction :io
+                                   :if-exists :overwrite
                                    :element-type '(unsigned-byte 8))
              (let ((position (1- (file-length stream))))
                (file-position stream position)
