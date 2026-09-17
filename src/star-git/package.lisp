@@ -51,6 +51,15 @@
    :pack-id-for-path
    :read-pack-metadata
    :pack-locations
+   ;; cold custody / placement
+   :register-custody-receipt
+   :read-custody-receipt
+   :custody-receipts-for-pack
+   :verified-custody-receipts-for-pack
+   :object-locations
+   :object-availability
+   :plan-object-restore
+   :evict-hot-object
    :fsck
    ;; conditions
    :ref-conflict
@@ -79,4 +88,9 @@
    :pack-error-pathname
    :pack-error-reason
    :pack-integrity-error
-   :pack-integrity-object-id))
+   :pack-integrity-object-id
+   :custody-error
+   :custody-error-reason
+   :custody-policy-error
+   :custody-policy-error-object-id
+   :custody-policy-error-minimum-custody))

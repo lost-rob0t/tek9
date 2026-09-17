@@ -11,4 +11,5 @@
                (:file "snapshots")
                (:file "compression")
                (:file "packs")
-               (:file "commit-v2")))
+               (:file "commit-v2")
+               (:file "custody")))
