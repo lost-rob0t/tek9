@@ -12,4 +12,5 @@
                (:file "compression")
                (:file "packs")
                (:file "commit-v2")
-               (:file "custody")))
+               (:file "custody")
+               (:file "random-access")))
