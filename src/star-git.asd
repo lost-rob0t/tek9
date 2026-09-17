@@ -8,5 +8,6 @@
   :depends-on (#:tek9 #:ironclad #:babel #:cffi)
   :components ((:file "package")
                (:file "repository")
+               (:file "snapshots")
                (:file "compression")
                (:file "packs")))
