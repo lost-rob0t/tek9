@@ -146,6 +146,38 @@ This is an explicit RAM-for-sequential-I/O path, not an unconditional replacemen
 
 Arbitrary point IDs are resolved inside one read snapshot with direct LMDB =MDB_GET= operations. Exact-key cursor seeks benchmarked worse and were removed from this path.
 
+** Checkpointed external-source ingest
+
+Long-running importers can atomically commit normalized documents, graph nodes,
+graph edges, and a source watermark. Tek9 does not know the upstream schema;
+the adapter supplies already-normalized records.
+
+#+begin_src lisp
+(apply-ingest-batch
+ db
+ "navidrome"
+ 42
+ :expected-generation 41
+ :documents track-documents
+ :nodes graph-nodes
+ :edges graph-edges
+ :graph-name "music"
+ :watermark "last-media-file-id")
+#+end_src
+
+The generation fence rejects stale writers. The checkpoint advances only if
+every document and graph mutation commits successfully; any error aborts the
+entire LMDB transaction.
+
+#+begin_src lisp
+(fetch-ingest-checkpoint db "navidrome")
+;; => (:SOURCE-ID "navidrome" :GENERATION 42
+;;     :WATERMARK "last-media-file-id" :COMMITTED-AT ...)
+#+end_src
+
+Use this for canonical mirrors and resumable imports. Keep upstream-specific
+SQLite/API/file parsing outside Tek9.
+
 ** Secondary indexes
 
 A secondary index is another LMDB named database, not a Lisp hash-table cache. Non-unique indexes use DUPSORT so one indexed value maps directly to multiple sorted document IDs.
