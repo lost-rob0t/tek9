@@ -44,11 +44,34 @@
               cl.cffi
             ];
           };
+          sbclWithTek9 = pkgs.sbcl.withPackages (_: [ tek9 ]);
+          tek9IngestWorker = pkgs.writeShellApplication {
+            name = "tek9-ingest-worker";
+            runtimeInputs = [ sbclWithTek9 ];
+            text = ''
+              if [[ -z "${TEK9_DB_PATH:-}" ]]; then
+                echo "TEK9_DB_PATH is required" >&2
+                exit 64
+              fi
+              exec sbcl --noinform --disable-debugger --non-interactive \
+                --eval '(require :asdf)' \
+                --eval '(asdf:load-system :tek9)' \
+                --eval '(tek9:run-ingest-worker (uiop:parse-native-namestring (uiop:getenv "TEK9_DB_PATH")))'
+            '';
+          };
         in
         {
           default = tek9;
           inherit tek9 star-git;
+          tek9-ingest-worker = tek9IngestWorker;
         });
+
+      apps = eachSystem (system: {
+        ingest-worker = {
+          type = "app";
+          program = "${self.packages.${system}.tek9-ingest-worker}/bin/tek9-ingest-worker";
+        };
+      });
 
       devShells = eachSystem (system:
         let
@@ -76,11 +99,27 @@
           tek9 = self.packages.${system}.tek9;
           starGit = self.packages.${system}.star-git;
           sbclWithTek9 = pkgs.sbcl.withPackages (_: [ tek9 ]);
+          tek9IngestWorker = self.packages.${system}.tek9-ingest-worker;
           sbclWithStarGit = pkgs.sbcl.withPackages (_: [ starGit ]);
         in
         {
           package = tek9;
           star-git-package = starGit;
+
+          ingest-worker-smoke = pkgs.runCommand "tek9-ingest-worker-smoke" {
+            nativeBuildInputs = [ tek9IngestWorker pkgs.jq ];
+          } ''
+            export HOME="$TMPDIR/home"
+            export TEK9_DB_PATH="$TMPDIR/tek9-ingest/"
+            mkdir -p "$HOME"
+
+            printf '%s\n' '{"op":"status","source_id":"navidrome"}' \
+              | tek9-ingest-worker \
+              | jq -e '.ok == true and .generation == 0 and .watermark == null' >/dev/null
+
+            test -f "$TEK9_DB_PATH/data.mdb"
+            touch "$out"
+          '';
 
           package-smoke = pkgs.runCommand "tek9-package-smoke" {
             nativeBuildInputs = [ sbclWithTek9 ];
