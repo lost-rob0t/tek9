@@ -12,6 +12,7 @@
                (:file "test-graphs")
                (:file "test-transactions")
                (:file "test-ingest")
+               (:file "test-ingest-worker")
                (:file "test-graph-lifecycle")
                (:file "test-views")
                (:file "test-persistence")
