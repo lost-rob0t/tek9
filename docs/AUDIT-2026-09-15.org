@@ -1,0 +1,103 @@
+#+title: Tek9 source audit — 2026-09-15
+#+date: 2026-09-15
+#+options: toc:2 num:nil
+
+* Baseline and method
+
+Repository: [[https://github.com/lost-rob0t/tek9][lost-rob0t/tek9]]. Audited =master= commit:
+[[https://github.com/lost-rob0t/tek9/commit/1cb978084da8b4f1d184b3ef2a1d30057f525608][1cb978084da8b4f1d184b3ef2a1d30057f525608]], ASDF version 0.2.0.
+Audit date uses America/New_York; GitHub timestamps for this work fall on
+September 16 in UTC.
+
+Reviewed all loaded core implementation files: package, objects, documents,
+indexes, graphs, graph-lifecycle, views, query and the commented tek9 stub.
+Reviewed the system definitions, transaction/view/index/graph/persistence tests,
+README, Nix package definition, CI/release workflows, benchmark aggregation and
+regression-checker source, and the LICENSE header. This was not an exhaustive
+review of every historical benchmark artifact, every test helper, dependency
+source or every execution interleaving.
+
+Method: trace mutation and rollback paths; compare ordinary and bulk behavior;
+check physical/logical identities and reopen behavior; compare tests with the
+public contracts; inspect resource bounds and CI failure conditions; deduplicate
+against existing issues. All findings below are source-level findings. SBCL,
+Emacs and the native runtime were unavailable locally. No FiveAM, tutorial,
+CouchDB integration, CI run or memory benchmark is claimed to have passed.
+Issue reproductions are proposed RED tests, not fabricated execution logs.
+
+* Findings filed
+
+18 issues were created: eight P1 integrity findings and ten P2
+correctness/resource/tooling findings. Severity is proposed triage, not a claim
+of an observed production incident. Each issue contains the pinned source,
+impact, an example or test fixture, an implementation boundary and acceptance
+criteria. Related symptoms share an issue when they require the same contract
+or identity fix; separate defects are not hidden in a catch-all ticket.
+
+| Issue | Priority | Finding | Main source |
+|-------+----------+---------+-------------|
+| [[https://github.com/lost-rob0t/tek9/issues/18][#18]] | P1 | Duplicate new graph IDs create orphan rows/adjacency | graphs.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/19][#19]] | P1 | Caught mutation errors allow partial outer commit | objects.lisp, indexes.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/20][#20]] | P1 | Incremental views never retract old emissions | views.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/21][#21]] | P1 | Dirty tracking includes aborts, omits deletes/source identity | documents.lisp, views.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/22][#22]] | P2 | Equal view emission keys silently overwrite | views.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/23][#23]] | P2 | Unique multi-valued index rejects its own repeated key | indexes.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/24][#24]] | P1 | Incompatible schema can reuse cached DBI flags/codec | objects.lisp, indexes.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/25][#25]] | P1 | Index names alias physical/registered identities | indexes.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/26][#26]] | P1 | Predicate identity depends on dynamic printing | graphs.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/27][#27]] | P2 | Streaming rebuild/clear retains all old keys | indexes.lisp, views.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/28][#28]] | P2 | Limited view reads still scan all rows; map materializes | views.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/29][#29]] | P1 | Failed live index setup publishes partial configuration | objects.lisp, indexes.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/30][#30]] | P2 | Public db-count is an unmaintained zero-valued slot | objects.lisp, package.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/31][#31]] | P2 | Main-DBI open failure escapes environment cleanup | objects.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/32][#32]] | P2 | Ordinary writes retain unbounded dirty-vector storage | documents.lisp, objects.lisp |
+| [[https://github.com/lost-rob0t/tek9/issues/33][#33]] | P2 | Empty/non-finite benchmark configuration can false-pass | benchmark Python helpers |
+| [[https://github.com/lost-rob0t/tek9/issues/34][#34]] | P2 | Final PR benchmark compares only HEAD's parent | ci.yml |
+| [[https://github.com/lost-rob0t/tek9/issues/35][#35]] | P2 | ASDF says MIT; bundled LICENSE is LGPLv3 | ASDF definitions, LICENSE |
+
+The view collision ticket (#22) intentionally asks for a contract decision:
+retain distinct emissions or reject collisions. It does not assume that every
+existing user intended a CouchDB-style multimap. The current silent overwrite
+behavior is explicit in source and should not remain an accidental policy.
+
+* Existing issues not duplicated
+
+The source already implements the public view readers (#2), composable
+transactions (#4), graph lifecycle (#5), Nix consumer package (#7) and named
+view sources (#15). Their existence was not re-filed as missing functionality.
+Existing #10/#12 cover map growth; that work was not duplicated.
+
+Issue [[https://github.com/lost-rob0t/tek9/issues/13][#13]] is closed as =not_planned=. Its previous explanation attributes
+missing duplicate range results to =cursor-next=. The
+[[https://github.com/antimer/lmdb][upstream LMDB binding]] documents CURSOR-NEXT as visiting duplicate values too;
+CURSOR-NEXT-NODUP is the skipping primitive. This audit therefore does not repeat
+that claimed root cause or reopen the issue without a runnable failing fixture
+and exact dependency version. The consumer observation and a proposed cause
+are different kinds of evidence.
+
+* Recommended order
+
+First fix #19 and #18, then index identity/publication (#24/#25/#29) and predicate
+identity (#26). These protect authoritative state. Next implement coherent
+committed invalidation and view ownership (#20/#21/#22), alongside memory bounds
+(#27/#28/#32). Handle ordinary index consistency (#23), lifecycle/count fixes
+(#30/#31), and test/packaging credibility (#33/#34/#35).
+
+Before landing each fix, run its new RED fixture against the audited baseline,
+then the complete suite against the fix's exact head. Include reopen checks and
+physical index/adjacency assertions; a public query that simply hides an orphan
+is not proof that storage is consistent. No source fixes or license change are
+part of the accompanying documentation branch.
+
+* Deliverables and validation boundary
+
+- [[file:USAGE.org][Usage guide]]: current exported APIs, actual argument/result shapes and caveats.
+- [[file:TUTORIAL.org][Org tutorial]] and [[file:../examples/tutorial.lisp][Lisp tutorial]]: local assertions and fresh-handle persistence.
+- [[file:COUCHDB-SYNC.org][CouchDB plan]]: journal, immutable commit envelopes, Sento adapter, checkpoints,
+  conflict policy, bootstrap, retention, security and failure-injection slices.
+
+Local documentation checks are structural only: balanced Lisp parentheses and
+strings, public Tek9 symbol names, expected file links and publication hashes.
+They do not establish that the Lisp reader/compiler, native LMDB calls or the
+application assertions pass. Run the tutorial and FiveAM commands in USAGE.org
+on a real SBCL/LMDB environment before merging it as a verified example.

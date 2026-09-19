@@ -1,0 +1,19 @@
+#+title: Tek9 documentation
+#+options: toc:nil num:nil
+
+* Start here
+
+[[file:docs/USAGE.org][Usage guide]] — loading, lifecycle, documents, indexes, transactions, graphs,
+views and the current API's limits.
+
+[[file:docs/TUTORIAL.org][Small Org tutorial]] — run and understand the accompanying
+[[file:examples/tutorial.lisp][Common Lisp example]]. It creates a fresh store and checks persistence.
+
+[[file:docs/AUDIT-2026-09-15.org][Source audit]] — pinned baseline, all 18 issues, triage and verification limits.
+
+[[file:docs/COUCHDB-SYNC.org][CouchDB sync library design]] — an embeddable Common Lisp library with Sento
+required, caller-owned actor context, durable journal and explicit lifecycle.
+[[https://github.com/lost-rob0t/tek9/issues/37][Implementation issue #37]] tracks that library; it is not implemented by these docs.
+
+The audit/example have not been runtime-tested in the authoring environment.
+See the usage guide for the exact local validation commands.

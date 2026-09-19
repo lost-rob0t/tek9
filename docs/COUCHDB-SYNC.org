@@ -1,0 +1,352 @@
+#+title: Tek9 CouchDB sync library — Sento architecture
+#+date: 2026-09-15
+#+options: toc:2 num:nil
+
+* Required architecture and implementation status
+
+This is a reusable, embeddable Common Lisp library using *Sento as a required
+dependency*. It is not a daemon, sidecar, standalone server, or an actor-free
+synchronizer with an optional Sento wrapper. The host decides whether to load
+the sync library; it does not select whether that library uses Sento.
+
+DESIGN ONLY: the library and proposed API below are not implemented by this PR.
+[[https://github.com/lost-rob0t/tek9/issues/37][Implementation issue #37]] owns the library work. Audited Tek9 baseline:
+=1cb978084da8b4f1d184b3ef2a1d30057f525608=, version 0.2.0.
+
+Keep Tek9 authoritative for local commits. CouchDB is a remote exchange/recovery
+endpoint, not a prerequisite for an ordinary local write. Start push-only with
+one authority; add inbound/offline multi-peer work after replay, conflict and
+bootstrap tests pass. No deployment or remote configuration is part of this plan.
+
+* ASDF and package boundary
+
+Implement the extension in this repository, not in a separate service project.
+The following system/package names are proposed, not available exports:
+
+| System | Responsibility |
+|--------+----------------|
+| tek9 | Embedded storage and composable transactions; no sync dependency |
+| tek9/change-journal | Generic committed logical mutations, versions and provenance |
+| tek9/couchdb-sync | Sento actors, protocol, lifecycle, peer configuration and HTTP |
+| tek9/couchdb-sync/tests | Library, actor lifecycle and disposable-CouchDB tests |
+
+=tek9/couchdb-sync= directly depends on =tek9/change-journal= and =sento=,
+plus the selected transport/codec dependencies. Do not introduce a separate
+=tek9/couchdb-sync/sento= system or a feature flag that makes Sento optional.
+Package: =tek9.couchdb-sync=; proposed nickname: =t9-sync=.
+
+Loading =tek9= alone must continue to work without installing the sync stack.
+Loading or constructing the sync library starts no actors, timers, environment
+handles or HTTP requests. Initialization requires an explicit lifecycle call.
+Do not create a hidden global actor system or use top-level DEFPARAMETER to
+start a runtime. No listening server, service executable, systemd unit, external
+scheduler, or hand-written actor framework belongs in this library.
+
+No StarIntel actor registry/discovery or routing moves into Tek9. The Sento
+context below is ordinary in-process actor ownership, not StarIntel's registry.
+
+* Public embedding contract
+
+Proposed signatures; these functions are not currently callable:
+
+#+begin_example
+make-sync-client database &key actor-context storage-owner peers transport
+start-sync client
+sync-once client &key peer-id
+sync-status client
+stop-sync client &key timeout
+#+end_example
+
+=make-sync-client= returns an inert configuration/client object. ACTOR-CONTEXT
+and STORAGE-OWNER are required. The caller supplies the existing Sento context,
+open Tek9 handle and actor that owns that handle. Validate configuration without
+invoking credential callbacks, sending messages or doing I/O. On START-SYNC,
+verify that the owner serves the supplied database before admitting work.
+
+The four lifecycle/work/status functions return Sento futures carrying explicit
+success, error or timeout results. Use immutable status/error data; do not expose
+DBIs, cursors or mutable actor state. A caller must await or chain the start
+completion before using the started client. No function blocks a shared actor
+dispatcher waiting for a reply from another actor on that dispatcher.
+
+=sync-once= captures a finite per-peer journal high-water mark and works toward
+that mark under configured retry/deadline budgets. It reports acknowledged,
+blocked and failed work; new commits after the captured mark do not prolong the
+call. A timeout does not prove that an HTTP write failed remotely.
+
+=stop-sync= stops intake, cancels owned timers, fences late replies and drains
+accepted work within a bounded shutdown budget. Unacknowledged work stays in the
+durable outbox. Return a timeout/draining result with outstanding work if workers
+have not exited; never report stopped merely because a stop message was sent.
+A later completion may establish the stopped state. Do not force-kill a thread
+inside a database transaction.
+
+Stopping a client must not stop the caller's actor context, unrelated actors,
+the supplied storage owner, or the borrowed database. Support multiple clients
+under one context with distinct actor names. Partial startup failure releases
+only resources created by that startup attempt. A restarted client uses a new
+runtime generation so stale responses cannot acknowledge its replacement's work.
+
+* Sento actor topology and storage integration
+
+Use actual [[https://mdbergmann.github.io/cl-gserver/index.html][Sento]] actors, request/reply, dispatchers, lifecycle watching and
+scheduling. The upstream [[https://github.com/mdbergmann/cl-gserver/blob/master/sento.asd][ASDF definition]] names the system =sento=. Pin and test
+the selected dependency revision before implementation; documentation examples
+alone are not evidence that a particular runtime version has passed.
+
+#+begin_example
+Caller-owned Sento actor context
+  existing storage-owner actor               [borrowed, not stopped by sync]
+  sync client lifecycle/supervisor actor      [library-owned subtree]
+    peer coordinator A
+    peer coordinator B
+    bounded HTTP workers                     [dedicated dispatchers]
+#+end_example
+
+The storage owner remains the sole owner of its Tek9 environment. Do not open a
+second environment or introduce a competing storage actor when attaching sync.
+Supply a versioned message protocol and a local handler adapter for the existing
+owner: describe-store, read-journal-page, acknowledge-envelope, store-inbox-page,
+apply-envelope and read-progress. Integrating that handler does not replace the
+host's receive behavior or take over its lifecycle.
+
+The journal's synchronous local functions execute inside storage-owner handlers.
+Every LMDB transaction starts and finishes in one handler/thread. Use a pinned
+storage dispatcher where required by the host/runtime integration; never pass a
+transaction/cursor through an actor mailbox. The client and HTTP workers receive
+bounded copied data, not mutable storage internals or executable closures from
+remote senders. Decode remote JSON into validated typed data messages only.
+
+[[https://github.com/fukamachi/dexador][Dexador]] is the initial planned blocking HTTP backend behind an injectable
+transport protocol. Execute it in dedicated bounded Sento HTTP workers, never
+inside the storage owner or on the caller's general-purpose shared dispatcher.
+An asynchronous backend may implement the same transport protocol later without
+changing the required Sento runtime or journal contract.
+
+Use lifecycle notifications to implement bounded restart/backoff policy; actor
+hierarchy alone does not imply automatic durable supervision. Mailboxes and
+Sento event streams are wakeups/coordination, not the durable source of pending
+work. Reserve capacity for completions or make them recoverable from durable
+state; a full mailbox must not silently discard an acknowledgement.
+
+* Scope and transaction protocol
+
+Synchronize logical documents in enrolled named keyspaces and logical graph
+node/edge mutations. Preserve external IDs and graph names. Do not transmit LMDB
+DBIs, physical uint64 graph rows, functions, caches, materialized views or index
+postings. Recipients maintain/rebuild derived structures locally.
+
+The first wire protocol is application-level immutable commit-envelope sync:
+one bounded CouchDB document represents one committed Tek9 mutation set.
+CouchDB's [[https://docs.couchdb.org/en/stable/api/database/bulk-api.html][bulk API]] is not atomic across documents and reports per-document failures.
+Its [[https://docs.couchdb.org/en/stable/api/database/changes.html][changes feed]] does not guarantee every intermediate revision of a repeatedly
+updated document. Immutable commit records avoid treating overwritten entity
+snapshots as historical change storage. This is not native CouchDB replication.
+
+Within the same outer local write transaction, validate enrolled values and
+bounds, apply canonical mutations and indexes, allocate an origin sequence,
+record logical versions/tombstones, and store the complete envelope/outbox entry.
+Commit everything or nothing. Oversized synchronized transactions abort rather
+than silently splitting their atomic write-set across network documents.
+
+No HTTP request or externally visible mailbox side effect occurs before commit.
+A post-commit wakeup is optional; restarting from the durable outbox must recover
+all committed work even if every wakeup was lost. The legacy DB-CHANGED vector
+is not the journal. Capture bulk operations, replacements, node cascades and
+graph clearing too. Direct untracked LMDB writes are outside this contract.
+
+Record identity is =(kind, logical-namespace, external-id)= with a versioned,
+unambiguous encoding. Normalize repeated writes in a transaction to final-state
+operations retaining original preconditions and graph dependencies. Logical
+versions are origin commit/operation identities, never CouchDB =_rev= values.
+Cross-record application constraints require captured read preconditions or
+explicit validators; local atomicity does not make offline writers globally
+serializable.
+
+* Wire codec and identities
+
+Illustrative envelope, not an available Tek9 serializer:
+
+#+begin_src json
+{
+  "_id": "t9c:replica-uuid:00000000000000000042",
+  "type": "tek9.commit",
+  "schema_version": 1,
+  "store_id": "workspace-uuid",
+  "origin": "replica-uuid",
+  "origin_sequence": "42",
+  "previous_origin_commit": "t9c:replica-uuid:00000000000000000041",
+  "operations": [
+    {"op": "document.put", "namespace": "std", "id": "person:ada",
+     "base_version": null, "value": {"type": "person", "name": "Ada"}},
+    {"op": "node.put", "namespace": "people", "id": "ada",
+     "base_version": null, "props": {"name": "Ada"}}
+  ],
+  "content_digest": "sha256:canonical-envelope-digest"
+}
+#+end_src
+
+Persist an OS-random replica UUID and durable sequence high-water mark. Restore
+must not recycle an origin/sequence pair; a fork gets a new replica identity.
+Do not rely on the existing Tek9 key generator as a distributed uniqueness proof.
+
+Freeze an explicit codec: UTF-8 strings, string-keyed objects, arrays, distinct
+null/false, finite numeric handling, and tagged decimal strings for integers
+outside the selected interoperable numeric range. Plists/CLOS values require
+registered trusted codecs. Reject unsupported values before the local commit;
+never READ, EVAL or unrestricted-Conspack-decode received data.
+
+Canonicalization, Unicode/numeric treatment and digest exclusions require
+cross-language fixtures. Exclude CouchDB-managed =_rev= and the digest itself.
+A digest detects content/identity mismatch, not authenticity. Ordinary unrelated
+CouchDB documents need an explicit import mapping; they are not sync envelopes.
+
+* Push and acknowledgements
+
+The owner copies a bounded outbox page and closes its read transaction before
+HTTP. Workers POST =/{db}/_bulk_docs= with ordinary =new_edits=true=. Inspect
+every result; HTTP success does not establish that every envelope was stored.
+The owner commits successful acknowledgements locally. Later successes must not
+advance past or remove earlier failures.
+
+Retry stable IDs after ambiguous/lost responses. On conflict, fetch and compare
+canonical content: identical content is idempotent acknowledgement; different
+content under the same immutable ID is quarantined, never overwritten. Inspect
+relevant conflicting leaves when CouchDB itself has replicated conflicts rather
+than trusting only one winning revision. Do not use =new_edits=false= as a bypass.
+
+Server validation must reject ordinary writers' changes/deletions to committed
+envelopes. Keep administrative repair explicit. Persist/fence claimed in-flight
+work; stale generations cannot consume current work. Bound retries/backoff with
+jitter. Pause a peer on authentication failure without losing the outbox.
+
+* Pull, causal ordering and conflict policy
+
+Store bounded =_changes= pages and their exact opaque =last_seq= tokens in one
+local transaction. Never increment or impose numeric ordering on these tokens.
+Malformed/truncated responses cannot advance beyond durably retained data.
+Quarantine invalid records explicitly instead of silently skipping them.
+
+Apply a received envelope in one Tek9 transaction: validate schema, digest,
+origin, authorized namespaces, prior logical versions, causal dependencies and
+application constraints; apply all operations; record seen/applied status.
+Missing predecessors stay pending. Stale bases or conflicting local edits
+quarantine the entire envelope, not just the inconvenient operations.
+
+Default to manual conflicts, retaining both proposals. Resolution creates an
+explicit new commit referencing the competing versions. Delete-versus-edit is
+a conflict too. Do not hide lost updates behind wall-clock last-write-wins.
+Received checkpoints and applied per-origin progress are separate: received
+work may be blocked or quarantined. Expose that distinction in SYNC-STATUS.
+
+Keep original origin/commit IDs on imports. Replaying a seen envelope is a no-op;
+forwarding the original envelope may be allowed by policy. Minting a new local
+commit for each import would create an echo loop and is forbidden.
+
+* Graphs, bootstrap and retention
+
+Apply node creation before dependent edges, and dependent edge deletion before
+node removal. Preserve edge IDs across replacement. Journal complete cascade or
+clear effects atomically. V1 expands small cascades and rejects oversized synced
+transactions instead of committing partial graph changes.
+
+Deletions are logical tombstone operations, not deletion of the immutable event
+from CouchDB. Retain tombstones/history until active peers can recover through
+acknowledged history or a complete snapshot. Explicitly retire a peer before
+expiring history it still needs. Remote entity/search projections are derived,
+may lag, and are not the authoritative atomic recovery representation.
+
+V1 bootstrap quiesces canonical writes through the existing owner, captures a
+journal high-water mark, exports bounded pages with logical versions/tombstones,
+and seals a manifest with counts/digests. Internal snapshot data does not create
+application events. Timeout restarts an unsealed generation, never resumes from
+mixed snapshots. Resume writes after sealing; later journal events bridge it.
+
+Upload pages before the manifest. A receiver validates a complete generation in
+a fresh/offline environment before activation. Do not overwrite an active store
+page by page. Live snapshot swapping is a separate lifecycle feature. Stream
+pages within memory/disk quotas; interrupted upload must not create an active
+partial snapshot.
+
+Checkpoint identity includes store ID, peer database epoch, namespaces, direction
+and codec/schema fingerprint. Verify an explicit remote epoch marker, not just
+a URL, to detect a recreated database. Mismatch requires reconciliation or fresh
+bootstrap. GC needs a complete recoverable snapshot and per-peer acknowledgements;
+no peer silently falls behind retained history.
+
+* Bounds, security and status
+
+Proposed peer configuration data; defaults are unmeasured starting limits:
+
+#+begin_src lisp
+'(:peer-id "home-couch"
+  :endpoint "https://couch.example.invalid/tek9-commits"
+  :credential-provider :application-secret-store
+  :mode :push
+  :document-keyspaces ("std" "outbox")
+  :graphs ("people")
+  :conflict-policy :manual
+  :max-envelope-bytes 1048576
+  :max-operations 1000
+  :max-batch-bytes 4194304
+  :max-in-flight-batches 2)
+#+end_src
+
+Also configure actor mailbox capacity, admission/completion policy, worker count,
+connect/read deadlines, per-run retry budget, shutdown deadline, decompressed
+response size, parse depth and disk quota/backpressure. Durable outbox growth
+is still disk consumption; ordinary offline operation is supported only within
+an explicit capacity policy, not an infinite retention promise.
+
+Use verified TLS, application-supplied secrets, allowed endpoints and appropriate
+CouchDB access controls. Namespace selection is not authorization. Enforce trusted
+store/tenant boundaries on both sides. Do not log secrets or entire payloads.
+Credentials stay out of source, checkpoint IDs, serialized messages and status.
+
+Status includes lifecycle/generation, per-peer pending/claimed/acked counts/bytes,
+retry state, received checkpoint, applied progress, oldest blocked/quarantined
+commit, last successful exchange and redacted errors. Remote upload success does
+not prove that another Tek9 peer applied the commit or that peers have converged.
+
+* Delivery slices and acceptance
+
+| Slice | Deliverable | Required RED-first proof |
+|-------+-------------+--------------------------|
+| A | Inert library plus Sento lifecycle/transport interface | no load effects; shared-context isolation; bounded stop |
+| B | Local integrity and journal/codec | rollback; complete capture; bounds; reopen |
+| C | Push-only library | offline restart; lost response; mixed bulk results |
+| D | Inbox, dedup and conflicts | replay; causal gaps; edit/edit; delete/edit |
+| E | Bootstrap/retention/hardening | interrupted manifest; changed epoch; quotas; crashes |
+
+Slice A can begin using an injected storage/HTTP test double, but it must not be
+advertised as working persistence or sync. Before production synchronization,
+resolve #18/#19/#21/#24/#25/#26/#29 and coordinate #27/#28/#32 resource fixes.
+#20/#22 govern derived views; use rebuilds while they remain unresolved. Reuse
+map-growth work #10/#12 rather than adding a competing network-layer resize path.
+
+Required library tests: load Tek9 without sync; load/construct sync without new
+actors/timers/network; start two clients in one context; stop one and prove the
+other, an unrelated actor, external owner and database remain usable. Inject
+partial startup failure, full mailbox, blocked HTTP, late replies and restart.
+Verify explicit draining/timeout status and recovery from lost volatile wakeups.
+
+Required protocol tests: crash before/after local commit, after remote commit
+before acknowledgement, and during checkpoint storage; map-full; duplicate and
+out-of-order delivery; missing predecessors; conflicting immutable IDs; complete
+graph rollback; oversized/invalid payloads; null/false/array distinctions; and
+integers beyond JavaScript's exact range. Run a disposable real CouchDB service
+in addition to deterministic fault-injection transport tests.
+
+Add an actual runnable Org/Lisp embedding tutorial with the implementation. It
+must demonstrate caller-owned context, storage integration, future completions
+and isolated shutdown. The existing examples/tutorial.lisp demonstrates Tek9
+storage only and must not be represented as a running synchronization example.
+No runtime or integration tests for this proposed library have been run here.
+
+* Native replication is a separate contract
+
+Native CouchDB/PouchDB compatibility requires the [[https://docs.couchdb.org/en/stable/replication/protocol.html][replication protocol]]: revision
+ancestry/leaves, revision differences, protocol checkpoints and revision-preserving
+writes. =_revs_diff=, =_revisions= and =new_edits=false= are not shortcuts for new
+Tek9 data. This library plan uses ordinary HTTP storage of immutable application
+commits; it must not advertise native replication without those separate tests.

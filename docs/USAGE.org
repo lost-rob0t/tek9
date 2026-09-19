@@ -1,0 +1,289 @@
+#+title: Tek9 usage guide
+#+date: 2026-09-15
+#+options: toc:2 num:nil
+
+* Scope and status
+
+This guide describes Tek9 0.2.0 at commit
+=1cb978084da8b4f1d184b3ef2a1d30057f525608=. Tek9 is an embedded Common Lisp
+LMDB document/graph library, not an HTTP server, actor registry, or implemented
+CouchDB replicator. Its on-disk format and public API are still alpha.
+
+Start with [[file:TUTORIAL.org][the tutorial]] and [[file:../examples/tutorial.lisp][its Lisp source]]. Read
+[[file:AUDIT-2026-09-15.org][the audit]] before relying on incremental views or changing live index schemas.
+[[file:COUCHDB-SYNC.org][CouchDB sync]] is a proposed design, not an available API.
+
+The examples were checked against exported source APIs, but SBCL and the native
+LMDB dependency were unavailable in the audit environment. They have not been
+compiled or executed there. The tutorial contains assertions to run locally.
+
+* Installation and loading
+
+Install SBCL, the LMDB native library, and Quicklisp using your environment's
+normal package management. The repository's Nix dev shell supplies SBCL and
+native dependencies; it does not itself install Quicklisp's Lisp libraries.
+
+#+begin_src shell
+git clone https://github.com/lost-rob0t/tek9.git ~/quicklisp/local-projects/tek9
+cd ~/quicklisp/local-projects/tek9
+# On NixOS, enter the repository shell when using the Quicklisp route:
+nix develop
+#+end_src
+
+With Quicklisp already initialized in your Lisp image:
+
+#+begin_src lisp
+(ql:register-local-projects)
+(ql:quickload :tek9)
+#+end_src
+
+For an explicit checkout load, rather than relying on local-project discovery:
+
+#+begin_src lisp
+(require :asdf)
+(asdf:load-asd (truename "src/tek9.asd"))
+(ql:quickload :tek9)
+#+end_src
+
+Tek9 depends on Alexandria, Bordeaux Threads, Serapeum, JSOWN, LMDB and
+cl-conspack. The Nix package outputs =packages.<system>.tek9= and =default=
+are available for =x86_64-linux= and =aarch64-linux=. The root README contains a
+consumer =sbcl.withPackages= example. Keep mutable database paths outside the
+Nix store. The name of the ASDF system is =tek9=; the test system is =tek9-tests=.
+
+* Database lifetime and ownership
+
+#+begin_src lisp
+(let ((db (tek9:open-database
+           (tek9:new-database "notes"
+             :path #P"/tmp/tek9-notes/"
+             :max-size (* 256 1024 1024)
+             :durability :full
+             :index-definitions nil))))
+  (unwind-protect
+       (progn
+         (tek9:put* db '(:title "First note") :id "note:1")
+         (tek9:fetch* db "note:1"))
+    (tek9:close-database db)))
+#+end_src
+
+The =name= is a handle label; =path= selects the physical environment. Different
+names pointing at the same path are not independent databases. Keep one managed
+handle per environment in the application, and close it during orderly shutdown.
+Do not close/reconfigure a handle while other code is using it.
+
+Default map size is 16 GiB of virtual address capacity, not an eagerly allocated
+16 GiB payload file. =:max-dbs= defaults to 64 and =:max-readers= to 126. Graph
+operations use ten shared physical keyspaces; logical graph namespaces do not
+allocate ten additional DBIs each. Size the DBI budget for document keyspaces,
+indexes and views too. Map autogrowth is not implemented in this snapshot; see
+existing issues #10 and #12 before designing retry around map-full errors.
+
+Use =:full= for canonical data. =:metadata-lazy= and =:nosync= deliberately weaken
+crash durability; they are not a free performance optimization. Do not use
+=db-count= for truthful document counts in this snapshot (#30). Inspect
+=database-stats= instead; it returns environment and selected-keyspace statistics.
+
+* Documents and named keyspaces
+
+=put= accepts a DOCUMENT, while =put*= wraps an arbitrary supported Lisp value.
+Both replace the whole document at an existing ID; they are not patch APIs.
+Mutation of a fetched Lisp object alone does not persist anything.
+
+#+begin_src lisp
+(tek9:put db (tek9:new-document :id "person:1"
+                               :value '(:type "person" :name "Ada")))
+(tek9:fetch db "person:1")       ; DOCUMENT or NIL
+(tek9:fetch* db "person:1")      ; stored value or NIL
+(tek9:delete-document db "person:1")
+
+(tek9:put* db '(:state :pending) :id "job:1" :database-name "outbox")
+(tek9:fetch* db "job:1" :database-name "outbox")
+#+end_src
+
+The default document keyspace is =std=. An ID is unique within its source
+keyspace. Use strings for IDs and application-controlled names. Avoid slashes in
+index/source names until #25 is fixed; avoid internal =idx/=, =view/= and
+=graph/v2/= names. Do not expose raw keyspace names to untrusted callers.
+
+=fetch*= cannot distinguish a missing document from a stored NIL value. Use
+=fetch= and test for the DOCUMENT object's presence when that distinction matters.
+=fetch-bulk= returns ordered =(id . document-or-nil)= pairs, including missing
+IDs; =fetch-bulk*= returns the corresponding values. =map-database= calls a
+function with the raw key and decoded DOCUMENT inside one read snapshot; it is
+an iterator, not a list collector.
+
+=put-json= parses JSON and takes =_id=, then =id=, then a generated ID. It is a
+convenience importer, not CouchDB replication: no remote revision tree, conflict
+resolution, change checkpoint or transport is implemented by that function.
+Local Conspack encoding is not an untrusted-network serialization contract.
+
+* Atomic work
+
+#+begin_src lisp
+(tek9:with-write-transaction (db :database-names '("outbox" "metadata"))
+  (tek9:put* db '(:title "Updated") :id "note:1")
+  (tek9:put* db '(:state :pending) :id "send:1" :database-name "outbox")
+  (tek9:put* db '(:revision 2) :id "notes" :database-name "metadata"))
+#+end_src
+
+Existing public document/index/graph operations join a compatible outer
+transaction. Declare first-use custom document keyspaces at the outermost
+boundary so their handles are opened before the transaction starts. Register
+index definitions and views beforehand. Reopened named view/index sources may
+also need to be declared before first access in an explicit transaction.
+
+A read boundary allows reads; a write boundary allows reads and writes. A write
+inside an active read boundary signals TRANSACTION-MODE-ERROR. Accessing another
+Tek9 database inside a boundary signals TRANSACTION-DATABASE-ERROR; this is not a
+distributed transaction API.
+
+Let failures escape the write boundary, and catch them outside it. Until #19 is
+fixed, swallowing a failed mutation inside an outer transaction can commit
+partial index changes. Nested boundaries are joined transactions, not savepoints.
+Do not perform network I/O or publish externally visible actor messages before
+commit. Finish each transaction within its executing thread/message handler;
+never pass a live transaction or cursor through an actor mailbox.
+
+* Indexes and queries
+
+Index extractors receive a DOCUMENT, not the payload directly. NIL means no
+posting. String indexes accept strings or symbols converted to their names;
+=:uint64= keys must be integers from zero through 2^64-1. Multi-valued extractors
+return lists. Use distinct normalized keys per document until #23 is fixed.
+
+#+begin_src lisp
+(defparameter *definitions*
+  (list (tek9:new-index-definition
+         "person-type"
+         (lambda (doc) (getf (tek9:doc-value doc) :type)))))
+
+;; Supply this configuration every time a fresh handle opens the same store.
+(tek9:open-database
+ (tek9:new-database "people" :path #P"/tmp/tek9-people/"
+                            :index-definitions *definitions*))
+#+end_src
+
+Definitions are process configuration; postings are durable. Reopening with the
+same definitions reattaches them, but it does not rebuild stale data after an
+extractor change or writes performed without index maintenance. For an index
+added to existing data, explicitly call =register-index= with =:rebuild t= or
+call =rebuild-index=. Do not hot-swap key types, uniqueness, source identity or
+extractor schemas without a reviewed migration (#24, #25, #29).
+
+#+begin_src lisp
+(tek9:register-index db "person-type"
+  (lambda (doc) (getf (tek9:doc-value doc) :type)) :rebuild t)
+(tek9:index-document-ids db "person-type" "person") ; IDs
+(tek9:index-fetch db "person-type" "person")        ; documents
+(tek9:select-index db "person-type" "person")       ; values
+(tek9:select-primary-range db "person:" :end "person:zzzz" :limit 100)
+#+end_src
+
+Primary/index ranges include both endpoints. Their =:limit 0= means unlimited.
+Views differ: their END is exclusive, NIL means unlimited, and LIMIT zero means
+zero returned rows. =select= is a full-scan fallback; its default predicate omits
+documents whose value is NIL. Supply =:where (lambda (key doc) ...)= explicitly
+when that is not your desired predicate. Do not assume limit conventions match.
+
+* Bulk writes
+
+=put-bulk= takes a list of DOCUMENT objects and commits the batch atomically.
+=put-bulk*= takes a list of =(id value)= lists. =:sorted t= requires already
+ordered IDs; the implementation only checks the first key against the existing
+last key before using LMDB append. Leave the hint off unless the whole batch's
+ordering has been validated. Use bounded batches for non-atomic imports.
+
+=bulk-load= requires an empty source and builds registered indexes in the same
+transaction. It sorts/groups in memory; it is not a constant-memory ingestion
+primitive. =rebuild-index-fast= also groups in memory. The ordinary rebuild
+streams insertion, but clearing an existing index currently retains all old keys
+(#27), so its total peak memory is not bounded independently of index size.
+
+Ordinary PUT appends to a legacy dirty vector even without views; bound its use
+and clear it only when no consumer needs pending invalidations (#21, #32).
+Bulk operations default to =:track-changes nil=. The tutorial uses explicit
+rebuilds and does not depend on dirty tracking.
+
+* Graphs
+
+Persist nodes before edges, use stable external string IDs, and explicitly use
+string predicates until canonical predicate identity is fixed (#26).
+
+#+begin_src lisp
+(tek9:put-nodes db (list (make-instance 'tek9:node :id "a")
+                        (make-instance 'tek9:node :id "b"))
+                :database-name "investigation")
+(tek9:put-edge db (make-instance 'tek9:edge :id "e1"
+                       :source "a" :target "b" :predicate "knows")
+                :database-name "investigation")
+(tek9:fetch-node-neighbors db "a" :database-name "investigation"
+                                :predicate "knows")
+#+end_src
+
+=fetch-edge= resolves an edge ID. =fetch-graph-nodes= / =fetch-graph-edges= return
+all objects in a logical namespace, sorted by external ID. Adjacency readers
+support =:incoming t= and optional predicates. Parallel edges are distinct;
+neighbor results may therefore repeat the same neighboring node.
+
+=delete-edge= accepts an EDGE object; =delete-node= accepts a node ID and removes
+incident edges. =clear-graph= removes one logical graph. Different logical graphs
+can reuse external IDs. Never repeat a previously absent node or edge ID within
+one batch until #18 is fixed; individual replacements and genuinely distinct
+parallel-edge IDs are different cases.
+
+* Materialized views
+
+#+begin_src lisp
+(let ((view (tek9:new-view "outbox-by-id" nil nil
+                          :source-database-name "outbox")))
+  (tek9:define-map view
+    (emit (tek9:doc-id doc) (getf (tek9:doc-value doc) :state)))
+  (tek9:define-reduce view (length rows))
+  (tek9:add-view db view)
+  (tek9:apply-view-to-database db view)
+  (tek9:view-rows db view :limit 20))
+#+end_src
+
+The second NIL is the optional reducer placeholder before keyword arguments.
+The named source must already exist. Map bodies bind DOC and EMIT; reduce bodies
+bind ROWS, a list of =(key . value)= conses. =view-get= returns VALUE and a second
+presence value, so stored NIL is distinguishable from absence.
+
+Use unique emitted keys, preferably source document IDs. Shared keys currently
+overwrite each other (#22). Use full rebuilds after key changes, filtering or
+deletion until #20/#21 are fixed. =with-views= does not create an outer atomic
+transaction by itself. View ranges currently scan the entire view and MAP-VIEW
+materializes its selection (#28); do not treat them as bounded-work streaming
+APIs merely because the output is limited.
+
+* Verification
+
+From the checkout, with Quicklisp initialized:
+
+#+begin_src lisp
+(asdf:load-asd (truename "src/tek9.asd"))
+(asdf:load-asd (truename "tests/tek9-tests.asd"))
+(ql:quickload :tek9-tests)
+(asdf:test-system :tek9-tests)
+(load "examples/tutorial.lisp")
+(tek9-tutorial:run-tutorial :path #P"/tmp/tek9-tutorial-fresh/")
+#+end_src
+
+Use a fresh directory for each tutorial run; it deliberately refuses existing
+data and leaves its own database for inspection. Do not describe a check as
+passed without running it on the exact revision in use.
+
+* Source map
+
+| Topic | Authoritative implementation |
+|-------+------------------------------|
+| Lifecycle, transaction boundary, codec | [[file:../src/objects.lisp][objects.lisp]] |
+| Documents | [[file:../src/documents.lisp][documents.lisp]] |
+| Indexes and query | [[file:../src/indexes.lisp][indexes.lisp]], [[file:../src/query.lisp][query.lisp]] |
+| Graph storage and lifecycle | [[file:../src/graphs.lisp][graphs.lisp]], [[file:../src/graph-lifecycle.lisp][graph-lifecycle.lisp]] |
+| Views | [[file:../src/views.lisp][views.lisp]] |
+| Public symbols | [[file:../src/package.lisp][package.lisp]] |
+| Dependencies and version | [[file:../src/tek9.asd][tek9.asd]] |
+
+Native transaction/cursor details: [[https://github.com/antimer/lmdb][upstream Common Lisp LMDB binding]].
