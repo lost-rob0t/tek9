@@ -14,5 +14,6 @@
                (:file "query")
                (:file "graph-lifecycle")
                (:file "ingest")
+               (:file "ingest-worker")
                (:file "tek9"))
   :in-order-to ((test-op (test-op :tek9-tests))))
