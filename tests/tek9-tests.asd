@@ -11,6 +11,7 @@
                (:file "test-indexes")
                (:file "test-graphs")
                (:file "test-transactions")
+               (:file "test-ingest")
                (:file "test-graph-lifecycle")
                (:file "test-views")
                (:file "test-persistence")
