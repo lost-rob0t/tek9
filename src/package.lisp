@@ -27,6 +27,7 @@
    :ingest-generation-conflict-expected-generation
    :ingest-generation-conflict-actual-generation
    :ingest-generation-conflict-requested-generation
+   :apply-ingest-json-request :run-ingest-jsonl :run-ingest-worker
    ;; declarative indexes
    :index-definition :new-index-definition :*index-definitions*
    :index-definition-name :index-definition-key-fn
