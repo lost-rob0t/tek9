@@ -20,6 +20,13 @@
    :transaction-database-error
    :transaction-database-error-active-database
    :transaction-database-error-requested-database
+   ;; checkpointed external-source ingest
+   :apply-ingest-batch :fetch-ingest-checkpoint :ingest-generation
+   :ingest-generation-conflict
+   :ingest-generation-conflict-source-id
+   :ingest-generation-conflict-expected-generation
+   :ingest-generation-conflict-actual-generation
+   :ingest-generation-conflict-requested-generation
    ;; declarative indexes
    :index-definition :new-index-definition :*index-definitions*
    :index-definition-name :index-definition-key-fn
