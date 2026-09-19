@@ -49,7 +49,7 @@
             name = "tek9-ingest-worker";
             runtimeInputs = [ sbclWithTek9 ];
             text = ''
-              if [[ -z "${TEK9_DB_PATH:-}" ]]; then
+              if [[ -z "''${TEK9_DB_PATH:-}" ]]; then
                 echo "TEK9_DB_PATH is required" >&2
                 exit 64
               fi
