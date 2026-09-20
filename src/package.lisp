@@ -44,6 +44,27 @@
    :index-name :index-source-db :index-key-type :index-unique-p
    :index-document-ids :index-fetch :select :select-primary-range
    :select-index :select-index-range
+   ;; symbolic AI
+   :symbolic-variable-p
+   :symbolic-fact-id
+   :symbolic-assert-fact
+   :symbolic-retract-fact
+   :symbolic-query
+   :symbolic-register-expert
+   :symbolic-expert
+   :symbolic-experts
+   :symbolic-register-rule
+   :symbolic-rule
+   :symbolic-rules
+   :symbolic-infer
+   :symbolic-run-expert
+   :symbolic-ask
+   :symbolic-explain-fact
+   :symbolic-conflict
+   :symbolic-conflict-id
+   :symbolic-inference-limit
+   :symbolic-inference-limit-kind
+   :symbolic-inference-limit-value
    ;; graph
    :node :node-id :node-props :node-edges :edge :edge-id :edge-source
    :edge-predicate :edge-target :edge-key :get-default-graph-db :get-graph-db
