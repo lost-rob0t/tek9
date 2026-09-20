@@ -10,6 +10,8 @@
              (is (eq :created state))
              (is (string= id (symbolic-fact-id '(parent "alice" "bob")))))
            (symbolic-assert-fact db '(parent "bob" "carol"))
+           (signals error
+             (symbolic-query db '(?predicate "alice" "bob")))
            (let* ((fact-id (symbolic-fact-id '(parent "alice" "bob")))
                   (explanation (symbolic-explain-fact db fact-id))
                   (assertions (getf explanation :assertions)))
