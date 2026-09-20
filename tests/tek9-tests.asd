@@ -9,6 +9,7 @@
                (:file "create-db")
                (:file "test-documents")
                (:file "test-indexes")
+               (:file "test-symbolic")
                (:file "test-graphs")
                (:file "test-transactions")
                (:file "test-ingest")
