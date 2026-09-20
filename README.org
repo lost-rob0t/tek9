@@ -15,7 +15,10 @@ Version 0.2 keeps the small Lisp-facing API while moving the hot paths toward LM
 - graph-facing string IDs mapped once to compact internal uint64 row IDs;
 - fixed-width graph adjacency records and predicate-specific adjacency indexes;
 - full durability by default, with weaker durability profiles only when explicitly selected;
-- comparative CI benchmarks that gate performance regressions without mutating the source branch.
+- comparative CI benchmarks that gate performance regressions without mutating the source branch;
+- a durable symbolic-AI substrate with content-addressed facts, declared experts,
+  safe conjunctive rules, bounded forward inference, variable queries, and
+  proof provenance.
 
 Tek9 is still alpha software. Treat the on-disk format and public API as evolving until a stable release is cut.
 
@@ -229,6 +232,96 @@ Secondary indexes support the same pattern:
 #+end_src
 
 Use an index or ordered range when the predicate is indexable. =select= remains the full-scan fallback for arbitrary Lisp predicates.
+
+** Symbolic AI
+
+Tek9 includes a small, deterministic Datalog-style symbolic layer. It is an
+embedded reasoning substrate, not an LLM and not an arbitrary code executor.
+Facts, rule manifests, expert manifests, assertions, and derivation provenance
+are durable Tek9 records. Rule bodies are data: Tek9 never =eval=s them and does
+not expose a raw Prolog-goal escape hatch.
+
+Ground facts are content-addressed by their normalized term:
+
+#+begin_src lisp
+(symbolic-assert-fact *db* '(parent "alice" "bob")
+                      :source-ids '("import:family"))
+
+(symbolic-assert-fact *db* '(parent "bob" "carol"))
+#+end_src
+
+Queries use symbols whose names begin with =?= as variables. Every query is
+candidate-bounded and returns a second value when its bound made the answer
+incomplete:
+
+#+begin_src lisp
+(symbolic-query *db* '(parent "alice" ?who))
+;; => ((:FACT-ID ... :TERM ("parent" "alice" "bob")
+;;      :BINDINGS ((?WHO . "bob"))))
+;;    NIL
+#+end_src
+
+Experts are immutable capability manifests. Their input/output predicate
+declarations are enforced when rules are registered:
+
+#+begin_src lisp
+(symbolic-register-expert
+ *db*
+ "kinship/1"
+ :input-predicates '(parent)
+ :output-predicates '(grandparent)
+ :capabilities '(deduction explanation))
+
+(symbolic-register-rule
+ *db*
+ "kinship.grandparent/1"
+ '((parent ?x ?y)
+   (parent ?y ?z))
+ '((grandparent ?x ?z))
+ :expert-id "kinship/1")
+#+end_src
+
+Consequent variables must be bound by antecedents (range-restricted rules).
+Predicates are always ground names. This makes rules portable to external
+reasoners such as SWI-Prolog without making Tek9 itself accept executable Prolog
+text.
+
+Run one expert to a bounded fixed point:
+
+#+begin_src lisp
+(symbolic-run-expert *db* "kinship/1")
+;; => (:ROUNDS 2 :DERIVED 1 :DERIVATIONS 1 :SATURATED T)
+
+(symbolic-query *db* '(grandparent "alice" ?who))
+#+end_src
+
+Or infer and query in one operation:
+
+#+begin_src lisp
+(symbolic-ask *db*
+              '(grandparent "alice" ?who)
+              :expert-id "kinship/1")
+#+end_src
+
+Inference has explicit bounds for rules, rounds, candidate facts, binding
+states, and newly derived facts. Exceeding a bound signals
+=SYMBOLIC-INFERENCE-LIMIT= instead of returning an unsound partial proof.
+
+Derived facts record the rule, expert, and evidence fact IDs that produced
+them. Explicit assertions keep their source IDs and metadata separately from
+fact identity, so the same fact can have multiple independent provenance
+records:
+
+#+begin_src lisp
+(let ((fact-id (symbolic-fact-id '(grandparent "alice" "carol"))))
+  (symbolic-explain-fact *db* fact-id))
+#+end_src
+
+This layer is intentionally reasoner-neutral. Tek9 owns durable symbolic state,
+bounded matching, deterministic forward chaining, and provenance. A downstream
+system such as llm-log or Prolog-RLM can materialize these records into
+SWI-Prolog for richer expert reasoning while retaining Tek9 as the canonical
+knowledge store.
 
 ** Graph storage
 
