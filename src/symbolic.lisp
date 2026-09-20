@@ -58,6 +58,8 @@
 (defun %symbolic-normalize-term (term &key allow-variables)
   (unless (and (listp term) term)
     (error "A symbolic term must be a non-empty proper list."))
+  (when (symbolic-variable-p (first term))
+    (error "Symbolic predicates must be ground names, not variables."))
   (let ((predicate (%symbolic-name (first term) "predicate"))
         (arguments
           (loop for argument in (rest term)
