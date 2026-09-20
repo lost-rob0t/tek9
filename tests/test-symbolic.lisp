@@ -6,7 +6,8 @@
     (unwind-protect
          (progn
            (multiple-value-bind (id state)
-               (symbolic-assert-fact db '(parent "alice" "bob"))
+               (symbolic-assert-fact db '(parent "alice" "bob")
+                                :source-ids '("fixture:a"))
              (is (eq :created state))
              (is (string= id (symbolic-fact-id '(parent "alice" "bob")))))
            (symbolic-assert-fact db '(parent "bob" "carol"))
@@ -51,6 +52,10 @@
               (parent ?y ?z))
             '((grandparent ?x ?z))
             :expert-id "kinship/1")
+           (multiple-value-bind (rules truncated)
+               (symbolic-rules db :expert-id "kinship/1")
+             (is (null truncated))
+             (is (= 1 (length rules))))
            (symbolic-assert-fact db '(parent "alice" "bob")
                                 :source-ids '("fixture:a"))
            (symbolic-assert-fact db '(parent "bob" "carol")
