@@ -2,6 +2,7 @@
 
 (defparameter +symbolic-database-name+ "symbolic")
 (defparameter +symbolic-default-query-candidates+ 4096)
+(defparameter +symbolic-default-max-rules+ 4096)
 (defparameter +symbolic-default-max-bindings+ 4096)
 (defparameter +symbolic-default-max-derived+ 10000)
 (defparameter +symbolic-default-max-rounds+ 32)
@@ -138,11 +139,21 @@
   "Return the deterministic storage identity for ground TERM."
   (%symbolic-fact-key (%symbolic-normalize-term term :allow-variables nil)))
 
+(defun %symbolic-source-ids (source-ids)
+  (sort
+   (remove-duplicates
+    (mapcar
+     (lambda (source-id)
+       (unless (and (stringp source-id) (plusp (length source-id)))
+         (error "symbolic source IDs must be non-empty strings."))
+       source-id)
+     source-ids)
+    :test #'equal)
+   #'string<))
+
 (defun %symbolic-record-assertion (database fact-id source-ids metadata)
   (when (or source-ids metadata)
-    (let* ((source-ids (sort (remove-duplicates (copy-list source-ids)
-                                                :test #'equal)
-                             #'string<))
+    (let* ((source-ids (%symbolic-source-ids source-ids))
            (key (%symbolic-assertion-key fact-id source-ids metadata))
            (projection
              (list :symbolic-kind :assertion
@@ -420,15 +431,22 @@ arguments, and every variable in a consequent must be bound by an antecedent."
                             (%symbolic-name rule-id "rule-id")))))
     (and (%symbolic-rule-value-p value) value)))
 
-(defun symbolic-rules (database &key expert-id (limit 1024))
-  "Return registered rules, optionally restricted to EXPERT-ID."
-  (let ((expert-id (and expert-id (%symbolic-name expert-id "expert-id"))))
-    (remove-if-not
-     (lambda (value)
-       (and (%symbolic-rule-value-p value)
-            (or (null expert-id)
-                (equal expert-id (getf value :expert-id)))))
-     (%symbolic-prefix-values database "rule:" :limit limit))))
+(defun symbolic-rules (database &key expert-id (limit +symbolic-default-max-rules+))
+  "Return registered rules, optionally restricted to EXPERT-ID.
+
+The second value reports whether the bounded rule scan was truncated."
+  (let* ((expert-id (and expert-id (%symbolic-name expert-id "expert-id")))
+         (values (%symbolic-prefix-values database "rule:" :limit (1+ limit)))
+         (truncated (> (length values) limit))
+         (bounded (if truncated (subseq values 0 limit) values)))
+    (values
+     (remove-if-not
+      (lambda (value)
+        (and (%symbolic-rule-value-p value)
+             (or (null expert-id)
+                 (equal expert-id (getf value :expert-id)))))
+      bounded)
+     truncated)))
 
 (defun %symbolic-substitute (term bindings)
   (mapcar
@@ -518,6 +536,7 @@ arguments, and every variable in a consequent must be bound by an antecedent."
                        &key
                          expert-id
                          (max-rounds +symbolic-default-max-rounds+)
+                         (max-rules +symbolic-default-max-rules+)
                          (max-derived +symbolic-default-max-derived+)
                          (max-bindings +symbolic-default-max-bindings+)
                          (max-candidates +symbolic-default-query-candidates+))
@@ -527,6 +546,7 @@ Returns a plist with :ROUNDS, :DERIVED, :DERIVATIONS and :SATURATED. Inference
 fails explicitly when a safety bound is exceeded instead of silently returning
 an incomplete proof."
   (dolist (pair (list (cons :rounds max-rounds)
+                      (cons :rules max-rules)
                       (cons :derived max-derived)
                       (cons :bindings max-bindings)
                       (cons :candidates max-candidates)))
@@ -535,8 +555,11 @@ an incomplete proof."
   (when expert-id
     (unless (symbolic-expert database expert-id)
       (error "Unknown symbolic expert ~A." expert-id)))
-  (let ((rules (%symbolic-sort-rules
-                (symbolic-rules database :expert-id expert-id)))
+  (multiple-value-bind (registered-rules rules-truncated)
+      (symbolic-rules database :expert-id expert-id :limit max-rules)
+    (when rules-truncated
+      (error 'symbolic-inference-limit :kind :rules :limit max-rules))
+    (let ((rules (%symbolic-sort-rules registered-rules))
         (derived 0)
         (derivations 0)
         (rounds 0)
@@ -574,10 +597,10 @@ an incomplete proof."
                (when (zerop created-this-round)
                  (setf saturated t)
                  (return))))
-    (list :rounds rounds
-          :derived derived
-          :derivations derivations
-          :saturated saturated)))
+      (list :rounds rounds
+            :derived derived
+            :derivations derivations
+            :saturated saturated))))
 
 (defun symbolic-run-expert (database expert-id &rest inference-options)
   "Run only the rules owned by EXPERT-ID."
@@ -591,6 +614,7 @@ an incomplete proof."
                        expert-id
                        (limit 64)
                        (max-rounds +symbolic-default-max-rounds+)
+                       (max-rules +symbolic-default-max-rules+)
                        (max-derived +symbolic-default-max-derived+)
                        (max-bindings +symbolic-default-max-bindings+)
                        (max-candidates +symbolic-default-query-candidates+))
@@ -602,6 +626,7 @@ Returns ANSWERS, INFERENCE-STATS, and QUERY-TRUNCATED-P."
            database
            :expert-id expert-id
            :max-rounds max-rounds
+           :max-rules max-rules
            :max-derived max-derived
            :max-bindings max-bindings
            :max-candidates max-candidates)))
