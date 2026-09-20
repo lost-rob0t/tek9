@@ -12,6 +12,7 @@
                (:file "graphs")
                (:file "views")
                (:file "query")
+               (:file "symbolic")
                (:file "graph-lifecycle")
                (:file "ingest")
                (:file "ingest-worker")
