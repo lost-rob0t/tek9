@@ -99,6 +99,14 @@
 (defun %symbolic-expert-key (expert-id)
   (format nil "expert:~A" (%symbolic-hash expert-id)))
 
+(defun %symbolic-assertion-prefix (fact-id)
+  (format nil "assertion:~A:" fact-id))
+
+(defun %symbolic-assertion-key (fact-id source-ids metadata)
+  (format nil "~A~A"
+          (%symbolic-assertion-prefix fact-id)
+          (%symbolic-hash (list source-ids metadata))))
+
 (defun %symbolic-derivation-prefix (fact-id)
   (format nil "derivation:~A:" fact-id))
 
@@ -130,27 +138,38 @@
   "Return the deterministic storage identity for ground TERM."
   (%symbolic-fact-key (%symbolic-normalize-term term :allow-variables nil)))
 
-(defun symbolic-assert-fact (database term
-                             &key
-                               fact-id
-                               source-ids
-                               metadata)
+(defun %symbolic-record-assertion (database fact-id source-ids metadata)
+  (when (or source-ids metadata)
+    (let* ((source-ids (sort (remove-duplicates (copy-list source-ids)
+                                                :test #'equal)
+                             #'string<))
+           (key (%symbolic-assertion-key fact-id source-ids metadata))
+           (projection
+             (list :symbolic-kind :assertion
+                   :fact-id fact-id
+                   :source-ids source-ids
+                   :metadata metadata)))
+      (%symbolic-put-immutable database key projection))))
+
+(defun symbolic-assert-fact (database term &key source-ids metadata)
   "Persist one immutable ground symbolic TERM.
 
-SOURCE-IDS and METADATA are provenance data only; no Lisp form is evaluated.
+Facts are content-addressed by their normalized term. SOURCE-IDS and METADATA
+become separate provenance records, so independent assertions of the same fact
+never create contradictory fact objects. No Lisp form is evaluated.
+
 Returns FACT-ID and either :CREATED or :EXISTING."
   (let* ((term (%symbolic-normalize-term term :allow-variables nil))
-         (id (or fact-id (%symbolic-fact-key term)))
+         (id (%symbolic-fact-key term))
          (projection
            (list :symbolic-kind :fact
                  :fact-id id
                  :predicate (first term)
-                 :term term
-                 :source-ids (copy-list source-ids)
-                 :metadata metadata)))
+                 :term term)))
     (multiple-value-bind (_value state)
         (%symbolic-put-immutable database id projection)
       (declare (ignore _value))
+      (%symbolic-record-assertion database id source-ids metadata)
       (values id state))))
 
 (defun %symbolic-fact-value-p (value)
@@ -247,11 +266,12 @@ hit, so callers never mistake a bounded query for complete inference."
   "Delete FACT-ID and its stored derivation records atomically per document."
   (let ((deleted
           (delete-document database fact-id
-                           :database-name +symbolic-database-name+))
-        (prefix (%symbolic-derivation-prefix fact-id)))
-    (dolist (row (%symbolic-prefix-rows database prefix))
-      (delete-document database (car row)
-                       :database-name +symbolic-database-name+))
+                           :database-name +symbolic-database-name+)))
+    (dolist (prefix (list (%symbolic-assertion-prefix fact-id)
+                          (%symbolic-derivation-prefix fact-id)))
+      (dolist (row (%symbolic-prefix-rows database prefix))
+        (delete-document database (car row)
+                         :database-name +symbolic-database-name+)))
     deleted))
 
 (defun %symbolic-variables (terms)
@@ -469,6 +489,7 @@ arguments, and every variable in a consequent must be bound by an antecedent."
     states))
 
 (defun %symbolic-record-derivation (database fact-id rule state round)
+  (declare (ignore round))
   (let* ((rule-id (getf rule :rule-id))
          (evidence-ids (copy-list (getf state :evidence-ids)))
          (key (%symbolic-derivation-key fact-id rule-id evidence-ids))
@@ -477,8 +498,7 @@ arguments, and every variable in a consequent must be bound by an antecedent."
                  :fact-id fact-id
                  :rule-id rule-id
                  :expert-id (getf rule :expert-id)
-                 :evidence-ids evidence-ids
-                 :round round)))
+                 :evidence-ids evidence-ids)))
     (multiple-value-bind (_value status)
         (%symbolic-put-immutable database key projection)
       (declare (ignore _value))
@@ -597,6 +617,16 @@ Returns ANSWERS, INFERENCE-STATS, and QUERY-TRUNCATED-P."
     (unless (%symbolic-fact-value-p fact)
       (error "Unknown symbolic fact ~A." fact-id))
     (list :fact fact
+          :assertions
+          (remove-if-not
+           (lambda (value)
+             (and (listp value)
+                  (eq (getf value :symbolic-kind) :assertion)
+                  (equal fact-id (getf value :fact-id))))
+           (%symbolic-prefix-values
+            database
+            (%symbolic-assertion-prefix fact-id)
+            :limit limit))
           :derivations
           (remove-if-not
            (lambda (value)
