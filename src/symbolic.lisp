@@ -197,11 +197,11 @@ Returns FACT-ID and either :CREATED or :EXISTING."
                 (let ((binding (assoc expected result :test #'eq)))
                   (if binding
                       (unless (equal (cdr binding) actual)
-                        (return-from %symbolic-match-term nil))
+                        (return-from %symbolic-match-term (values nil nil)))
                       (push (cons expected actual) result))))
                ((not (equal expected actual))
-                (return-from %symbolic-match-term nil)))
-          finally (return result))))
+                (return-from %symbolic-match-term (values nil nil))))
+          finally (return (values result t)))))
 
 (defun symbolic-query (database pattern
                        &key
@@ -220,23 +220,28 @@ hit, so callers never mistake a bounded query for complete inference."
          (prefix (%symbolic-fact-prefix (first pattern)))
          (candidate-limit (1+ (max limit max-candidates)))
          (rows (%symbolic-prefix-rows database prefix :limit candidate-limit))
-         (truncated (> (length rows) (max limit max-candidates)))
-         (matches nil))
-    (dolist (row (if truncated
+         (candidate-truncated (> (length rows) (max limit max-candidates)))
+         (matches nil)
+         (result-truncated nil))
+    (dolist (row (if candidate-truncated
                      (subseq rows 0 (max limit max-candidates))
                      rows))
       (let ((value (cdr row)))
         (when (and (%symbolic-fact-value-p value)
                    (equal (first pattern) (getf value :predicate)))
-          (let ((bindings (%symbolic-match-term pattern (getf value :term))))
-            (when bindings
-              (push (list :fact-id (getf value :fact-id)
-                          :term (copy-tree (getf value :term))
-                          :bindings (nreverse bindings))
-                    matches)
-              (when (>= (length matches) limit)
-                (return)))))))
-    (values (nreverse matches) truncated)))
+          (multiple-value-bind (bindings matched-p)
+              (%symbolic-match-term pattern (getf value :term))
+            (when matched-p
+              (if (>= (length matches) limit)
+                  (progn
+                    (setf result-truncated t)
+                    (return))
+                  (push (list :fact-id (getf value :fact-id)
+                              :term (copy-tree (getf value :term))
+                              :bindings (nreverse bindings))
+                        matches)))))))
+    (values (nreverse matches)
+            (or candidate-truncated result-truncated))))
 
 (defun symbolic-retract-fact (database fact-id)
   "Delete FACT-ID and its stored derivation records atomically per document."
@@ -416,11 +421,11 @@ arguments, and every variable in a consequent must be bound by an antecedent."
 
 (defun %symbolic-merge-bindings (left right)
   (let ((result (copy-list left)))
-    (dolist (binding right result)
+    (dolist (binding right (values result t))
       (let ((existing (assoc (car binding) result :test #'eq)))
         (cond
           ((and existing (not (equal (cdr existing) (cdr binding))))
-           (return-from %symbolic-merge-bindings nil))
+           (return-from %symbolic-merge-bindings (values nil nil)))
           ((null existing)
            (push binding result)))))))
 
@@ -443,11 +448,11 @@ arguments, and every variable in a consequent must be bound by an antecedent."
                        :kind :candidates
                        :limit max-candidates))
               (dolist (match matches)
-                (let ((merged
-                        (%symbolic-merge-bindings
-                         bindings
-                         (getf match :bindings))))
-                  (when merged
+                (multiple-value-bind (merged compatible-p)
+                    (%symbolic-merge-bindings
+                     bindings
+                     (getf match :bindings))
+                  (when compatible-p
                     (push
                      (list :bindings merged
                            :evidence-ids
